@@ -5,14 +5,13 @@
 1. **Start PostgreSQL Database:**
 
    ```sh
-   docker compose up
+   docker compose up -d
    ```
 
-   To reinitialize, run:
+   To clear the database, run:
 
    ```sh
    docker compose down -v
-   docker compose up
    ```
 
 2. **Run the Backend:**

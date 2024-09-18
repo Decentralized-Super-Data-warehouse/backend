@@ -27,10 +27,10 @@ impl PostgreDatabase {
     pub async fn create_user(&self, user: &User) -> Result<User> {
         let result = sqlx::query!(
             r#"
-        INSERT INTO app_user (name, email, hashed_password, role)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, name, email, hashed_password, role, created_at, updated_at
-        "#,
+            INSERT INTO app_user (name, email, hashed_password, role)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, name, email, hashed_password, role, created_at, updated_at
+            "#,
             user.name,
             user.email,
             user.hashed_password,
