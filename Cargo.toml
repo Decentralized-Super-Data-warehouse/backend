@@ -19,3 +19,6 @@ utoipa-swagger-ui = { version = "6.0.0", features = ["axum"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = {version = "0.12.7", features = ["json"] }
+scraper = "0.20.0"
+headless_chrome = "1.0.15"
+failure = "0.1.8"

@@ -45,6 +45,10 @@ CREATE TABLE project (
     token varchar(64) not null,
     category varchar(128) not null,
     contract_address varchar(64) references account(address) on delete cascade,
+    num_chains integer,
+    core_developers integer,
+    code_commits integer,
+    total_value_locked float,
     created_at timestamp with time zone default current_timestamp not null,
     updated_at timestamp with time zone default current_timestamp not null
 );

@@ -1,13 +1,9 @@
-use std::time::Duration;
-
 use crate::models::{Account, Entity, Project, User};
 use sqlx::{postgres::PgPoolOptions, PgPool, Result};
 
 /// Connects to a PostgreSQL database with the given `db_url`, returning a connection pool for accessing it
 pub async fn connect_sqlx(db_url: &str) -> sqlx::PgPool {
     PgPoolOptions::new()
-        .acquire_timeout(Duration::from_secs(2))
-        .idle_timeout(Duration::from_secs(30))
         .max_connections(32)
         .min_connections(4)
         .connect(db_url)
@@ -212,7 +208,7 @@ impl PostgreDatabase {
             r#"
             INSERT INTO project (token, category, contract_address)
             VALUES ($1, $2, $3)
-            RETURNING id, token, category, contract_address, created_at, updated_at
+            RETURNING id, token, category, contract_address, num_chains, core_developers, code_commits, total_value_locked, created_at, updated_at
             "#,
             project.token,
             project.category,
@@ -232,13 +228,21 @@ impl PostgreDatabase {
             SET token = $1,
                 category = $2,
                 contract_address = $3,
+                num_chains = $4,
+                core_developers = $5,
+                code_commits = $6,
+                total_value_locked = $7,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = $4
-            RETURNING id, token, category, contract_address, created_at, updated_at
+            WHERE id = $8
+            RETURNING id, token, category, contract_address, num_chains, core_developers, code_commits, total_value_locked, created_at, updated_at
             "#,
             project.token,
             project.category,
             project.contract_address,
+            project.num_chains,
+            project.core_developers,
+            project.code_commits,
+            project.total_value_locked,
             project.id
         )
         .fetch_one(&self.sqlx_db)

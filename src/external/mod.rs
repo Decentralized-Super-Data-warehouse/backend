@@ -1,10 +1,18 @@
-use std::collections::HashMap;
-use serde_json::Value;
 use reqwest::Client;
+use scraper::{Html, Selector};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::error::Error;
+use std::time::Duration;
+
+use crate::models::TokenTerminalData;
+use headless_chrome::{Browser, LaunchOptionsBuilder};
 
 const FULLNODE_API: &str = "https://api.mainnet.aptoslabs.com/v1/";
-pub const USDT: &str = "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDT";
-pub const USDC: &str = "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDC";
+pub const USDT: &str =
+    "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDT";
+pub const USDC: &str =
+    "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDC";
 const DECIMALS_USD: u8 = 6;
 
 pub struct External {
@@ -18,6 +26,8 @@ impl External {
         }
     }
 
+    /// ~10s and takes ~1600 APIs
+    /// Should save this value to DB and only call this once a day to update it.
     pub async fn get_total_value_locked(&self, address: &str) -> Result<f64, reqwest::Error> {
         let res: Value = self
             .client
@@ -83,7 +93,9 @@ impl External {
             let client = self.client.clone();
 
             let task = tokio::task::spawn(async move {
-                if let Some((price, decimals)) = External::get_price_and_decimals(client, &token_clone).await {
+                if let Some((price, decimals)) =
+                    External::get_price_and_decimals(client, &token_clone).await
+                {
                     (price * reserve_clone as f64) / 10f64.powi(decimals as i32)
                 } else {
                     0.0
@@ -113,12 +125,14 @@ impl External {
         let (usdc_result, usdt_result) = tokio::join!(usdc_balance_future, usdt_balance_future);
 
         if let Some((balance_x, balance_y)) = usdc_result {
-            let price = balance_y / balance_x * 10f64.powi(decimals as i32 - DECIMALS_USD as i32);
+            let price = (balance_y as f64) / (balance_x as f64)
+                * 10f64.powi(decimals as i32 - DECIMALS_USD as i32);
             return Some((price, decimals));
         }
 
         if let Some((balance_x, balance_y)) = usdt_result {
-            let price = balance_y / balance_x * 10f64.powi(decimals as i32 - DECIMALS_USD as i32);
+            let price = (balance_y as f64) / (balance_x as f64)
+                * 10f64.powi(decimals as i32 - DECIMALS_USD as i32);
             return Some((price, decimals));
         }
 
@@ -154,7 +168,7 @@ impl External {
             .map(|d| d as u8)
     }
 
-    async fn get_balances(client: &Client, token: &str, stablecoin: &str) -> Option<(f64, f64)> {
+    async fn get_balances(client: &Client, token: &str, stablecoin: &str) -> Option<(i64, i64)> {
         let response: Value = client
             .get(format!(
                 "{FULLNODE_API}accounts/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa/resource/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::TokenPairMetadata<{},{}>",
@@ -167,15 +181,175 @@ impl External {
             .await
             .ok()?;
 
-        let balance_x: f64 = response["data"]["balance_x"]["value"]
+        let balance_x: i64 = response["data"]["balance_x"]["value"]
             .as_str()?
             .parse()
             .ok()?;
-        let balance_y: f64 = response["data"]["balance_y"]["value"]
+        let balance_y: i64 = response["data"]["balance_y"]["value"]
             .as_str()?
             .parse()
             .ok()?;
 
         Some((balance_x, balance_y))
     }
+
+    /// Use headless chrome to extract the data.
+    /// Note that it needs to wait for a few seconds (3) to load the data. 
+    /// Consider increasing it if sometimes the data couldn't be fetched.
+    pub async fn get_data_from_tokenterminal(
+        &self,
+        project: &str,
+    ) -> Result<TokenTerminalData, Box<dyn Error>> {
+        // Initialize the browser with headless mode
+        let browser = Browser::new(LaunchOptionsBuilder::default().headless(true).build()?)?;
+
+        // Create a new tab and navigate to the project page
+        let tab = browser.new_tab()?;
+        tab.navigate_to(&format!(
+            "https://tokenterminal.com/terminal/projects/{project}"
+        ))?;
+
+        // Wait for the page to load (consider using a more robust waiting mechanism)
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Get the page content
+        let html = tab.get_content()?;
+        let document = Html::parse_document(&html);
+
+        // Scrape ATH/ATL data
+        let (ath, ath_last, atl, atl_last) = self.scrape_ath_atl(&document)?;
+
+        // Scrape financial data
+        let (revenue_30d, revenue_annualized, expenses_30d, earnings_30d) =
+            self.scrape_financials(&document)?;
+
+        Ok(TokenTerminalData {
+            ath,
+            ath_last,
+            atl,
+            atl_last,
+            revenue_30d,
+            revenue_annualized,
+            expenses_30d,
+            earnings_30d,
+        })
+    }
+
+    fn scrape_ath_atl(
+        &self,
+        document: &Html,
+    ) -> Result<(String, String, String, String), Box<dyn Error>> {
+        let span_selector = Selector::parse("span")?;
+        let mut ath = String::new();
+        let mut ath_last = String::new();
+        let mut atl = String::new();
+        let mut atl_last = String::new();
+        let mut spans = document.select(&span_selector).peekable();
+
+        while let Some(span) = spans.next() {
+            let text = span.text().collect::<String>();
+            match text.as_str() {
+                "ATH" => {
+                    ath = spans.next().map(|s| s.text().collect()).unwrap_or_default();
+                    ath_last = spans.next().map(|s| s.text().collect()).unwrap_or_default();
+                }
+                "ATL" => {
+                    atl = spans.next().map(|s| s.text().collect()).unwrap_or_default();
+                    atl_last = spans.next().map(|s| s.text().collect()).unwrap_or_default();
+                }
+                _ => continue,
+            }
+        }
+
+        Ok((ath, ath_last, atl, atl_last))
+    }
+
+    fn scrape_financials(
+        &self,
+        document: &Html,
+    ) -> Result<(String, String, String, String), Box<dyn Error>> {
+        let li_selector = Selector::parse("li")?;
+        let div_selector = Selector::parse("div")?;
+        let mut revenue_30d = String::new();
+        let mut revenue_annualized = String::new();
+        let mut expenses_30d = String::new();
+        let mut earnings_30d = String::new();
+
+        for li in document.select(&li_selector) {
+            let mut divs = li.select(&div_selector);
+
+            if let Some(label_div) = divs.next() {
+                let label_text = label_div.text().collect::<String>();
+
+                if label_text.contains("Revenue (30d)") {
+                    if let Some(value_div) = divs.next() {
+                        revenue_30d = value_div
+                            .text()
+                            .collect::<Vec<_>>()
+                            .first()
+                            .cloned()
+                            .unwrap_or_default()
+                            .to_owned();
+                    }
+                }
+
+                if label_text.contains("Revenue (annualized)") {
+                    if let Some(value_div) = divs.next() {
+                        revenue_annualized = value_div
+                            .text()
+                            .collect::<Vec<_>>()
+                            .first()
+                            .cloned()
+                            .unwrap_or_default()
+                            .to_owned();
+                    }
+                }
+
+                if label_text.contains("Expenses (30d)") {
+                    if let Some(value_div) = divs.next() {
+                        expenses_30d = value_div
+                            .text()
+                            .collect::<Vec<_>>()
+                            .first()
+                            .cloned()
+                            .unwrap_or_default()
+                            .to_owned();
+                    }
+                }
+
+                if label_text.contains("Earnings (30d)") {
+                    if let Some(value_div) = divs.next() {
+                        earnings_30d = value_div
+                            .text()
+                            .collect::<Vec<_>>()
+                            .first()
+                            .cloned()
+                            .unwrap_or_default()
+                            .to_owned();
+                    }
+                }
+            }
+        }
+
+        Ok((revenue_30d, revenue_annualized, expenses_30d, earnings_30d))
+    }
+}
+
+#[tokio::test]
+async fn test_get_data_from_tokenterminal() {
+    let external = External::new();
+
+    let result = external
+        .get_data_from_tokenterminal("pancakeswap")
+        .await
+        .unwrap();
+
+    assert_eq!(result.ath, "$42.46");
+    assert_eq!(result.ath_last, "3.4y ago");
+    assert_eq!(result.atl, "$0.2234");
+    assert_eq!(result.atl_last, "3.9y ago");
+    assert_eq!(result.revenue_30d, "$4.24m");
+    assert_eq!(result.revenue_annualized, "$51.54m");
+    assert_eq!(result.expenses_30d, "$2.07m");
+    assert_eq!(result.earnings_30d, "$2.17m");
 }

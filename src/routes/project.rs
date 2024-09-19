@@ -1,16 +1,21 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State, http::StatusCode, middleware, response::IntoResponse, routing::{get, post, put}, Json, Router
+    extract::State,
+    http::StatusCode,
+    middleware,
+    response::IntoResponse,
+    routing::{get, post, put},
+    Json, Router,
 };
 use utoipa::OpenApi;
 
 use crate::{
     models::{
-        dto::{ProjectResponse, NewProject, UpdateProject},
-        Project, Error
+        dto::{NewProject, ProjectResponse, UpdateProject},
+        Error, Project,
     },
-    AppState
+    AppState,
 };
 
 use super::middlewares::auth_guard;
@@ -52,7 +57,10 @@ pub async fn create_project_handler(
     // Check if the account associated with the project exists
     if let Some(ref address) = body.contract_address {
         if state.db.get_account_by_address(address).await?.is_none() {
-            return Err(Error::new(StatusCode::BAD_REQUEST, "Account does not exist"));
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "Account does not exist",
+            ));
         }
     }
 
@@ -71,6 +79,10 @@ pub async fn create_project_handler(
         token: project.token,
         category: project.category,
         contract_address: project.contract_address,
+        num_chains: project.num_chains,
+        core_developers: project.core_developers,
+        code_commits: project.code_commits,
+        total_value_locked: project.total_value_locked,
         created_at: project.created_at.to_string(),
         updated_at: project.updated_at.to_string(),
     }))
@@ -133,17 +145,19 @@ pub async fn update_project_handler(
     Json(body): Json<UpdateProject>,
 ) -> Result<impl IntoResponse, Error> {
     // Fetch the project by ID
-    let project = state
-        .db
-        .get_project_by_id(id)
-        .await
-        .map_err(|_| Error::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch project"))?;
+    let project =
+        state.db.get_project_by_id(id).await.map_err(|_| {
+            Error::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch project")
+        })?;
 
     if let Some(mut project) = project {
         // Check if the contract_address is provided and exists
         if let Some(address) = body.contract_address {
             if state.db.get_account_by_address(&address).await?.is_none() {
-                return Err(Error::new(StatusCode::BAD_REQUEST, "Account does not exist"));
+                return Err(Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "Account does not exist",
+                ));
             }
             project.contract_address = Some(address);
         } else {
@@ -159,6 +173,22 @@ pub async fn update_project_handler(
             project.category = category;
         }
 
+        if let Some(num_chains) = body.num_chains {
+            project.num_chains = Some(num_chains);
+        }
+
+        if let Some(core_developers) = body.core_developers {
+            project.core_developers = Some(core_developers);
+        }
+
+        if let Some(code_commits) = body.code_commits {
+            project.code_commits = Some(code_commits);
+        }
+
+        if let Some(total_value_locked) = body.total_value_locked {
+            project.total_value_locked = Some(total_value_locked);
+        }
+
         // Persist the updated project to the database
         let updated_project = state.db.update_project(&project).await?;
 
@@ -167,6 +197,10 @@ pub async fn update_project_handler(
             token: updated_project.token,
             category: updated_project.category,
             contract_address: updated_project.contract_address,
+            num_chains: updated_project.num_chains,
+            core_developers: updated_project.core_developers,
+            code_commits: updated_project.code_commits,
+            total_value_locked: updated_project.total_value_locked,
             created_at: updated_project.created_at.to_string(),
             updated_at: updated_project.updated_at.to_string(),
         }))
