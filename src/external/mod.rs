@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 
-use crate::models::TokenTerminalData;
+use crate::models::{SwapTransaction, TokenTerminalData};
 use headless_chrome::{Browser, LaunchOptionsBuilder};
 
-const FULLNODE_API: &str = "https://api.mainnet.aptoslabs.com/v1/";
+const FULLNODE_API: &str = "https://api.mainnet.aptoslabs.com/v1";
 pub const USDT: &str =
     "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDT";
 pub const USDC: &str =
@@ -31,7 +31,7 @@ impl External {
     pub async fn get_total_value_locked(&self, address: &str) -> Result<f64, reqwest::Error> {
         let res: Value = self
             .client
-            .get(format!("{FULLNODE_API}accounts/{address}/resources"))
+            .get(format!("{FULLNODE_API}/accounts/{address}/resources"))
             .send()
             .await?
             .json()
@@ -151,7 +151,7 @@ impl External {
         );
 
         let response: Value = client
-            .post(format!("{FULLNODE_API}graphql"))
+            .post(format!("{FULLNODE_API}/graphql"))
             .json(&serde_json::json!({ "query": graphql_query }))
             .send()
             .await
@@ -171,7 +171,7 @@ impl External {
     async fn get_balances(client: &Client, token: &str, stablecoin: &str) -> Option<(i64, i64)> {
         let response: Value = client
             .get(format!(
-                "{FULLNODE_API}accounts/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa/resource/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::TokenPairMetadata<{},{}>",
+                "{FULLNODE_API}/accounts/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa/resource/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::TokenPairMetadata<{},{}>",
                 token, stablecoin
             ))
             .send()
@@ -194,7 +194,7 @@ impl External {
     }
 
     /// Use headless chrome to extract the data.
-    /// Note that it needs to wait for a few seconds (3) to load the data. 
+    /// Note that it needs to wait for a few seconds (3) to load the data.
     /// Consider increasing it if sometimes the data couldn't be fetched.
     pub async fn get_data_from_tokenterminal(
         &self,
@@ -333,6 +333,92 @@ impl External {
 
         Ok((revenue_30d, revenue_annualized, expenses_30d, earnings_30d))
     }
+
+    /// Get 25 latest transactions impacting PancakeSwap
+    pub async fn get_swap_transactions(&self) -> Result<Vec<SwapTransaction>, Box<dyn Error>> {
+        let graphql_query = r#"
+        query AccountTransactionsData {
+            account_transactions(
+                limit: 25
+                where: {account_address: {_eq: "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa"}, user_transaction: {entry_function_id_str: {_eq: "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::router::swap_exact_input"}}}
+                order_by: {transaction_version: desc}
+            ) {
+                transaction_version
+                user_transaction {
+                    sender
+                }
+                coin_activities {
+                    activity_type
+                    amount
+                    coin_type
+                    entry_function_id_str
+                    coin_info {
+                        decimals
+                    }
+                }
+            }
+        }"#;
+
+        let response: Value = self
+            .client
+            .post(format!("{}/graphql", FULLNODE_API))
+            .json(&serde_json::json!({ "query": graphql_query }))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let mut transactions = Vec::new();
+
+        if let Some(array) = response["data"]["account_transactions"].as_array() {
+            for transaction in array {
+                let version = transaction["transaction_version"].as_i64().unwrap_or(0);
+                let sender = transaction["user_transaction"]["sender"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let mut token_sold = String::new();
+                let mut token_sold_amount = 0.0;
+                let mut token_bought = String::new();
+                let mut token_bought_amount = 0.0;
+
+                if let Some(activities) = transaction["coin_activities"].as_array() {
+                    for activity in activities.iter().skip(1) {
+                        let activity_type = activity["activity_type"].as_str().unwrap_or("");
+                        let amount = activity["amount"].as_f64().unwrap_or(0.0);
+                        let coin_type = activity["coin_type"].as_str().unwrap_or("").to_string();
+                        let decimals =
+                            activity["coin_info"]["decimals"].as_u64().unwrap_or(0) as u32;
+
+                        let adjusted_amount = amount / 10f64.powi(decimals as i32);
+
+                        match activity_type {
+                            "0x1::coin::WithdrawEvent" => {
+                                token_sold = coin_type;
+                                token_sold_amount = adjusted_amount;
+                            }
+                            "0x1::coin::DepositEvent" => {
+                                token_bought = coin_type;
+                                token_bought_amount = adjusted_amount;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                transactions.push(SwapTransaction {
+                    version,
+                    sender,
+                    token_sold,
+                    token_sold_amount,
+                    token_bought,
+                    token_bought_amount,
+                });
+            }
+        }
+
+        Ok(transactions)
+    }
 }
 
 #[tokio::test]
@@ -352,4 +438,28 @@ async fn test_get_data_from_tokenterminal() {
     assert_eq!(result.revenue_annualized, "$51.54m");
     assert_eq!(result.expenses_30d, "$2.07m");
     assert_eq!(result.earnings_30d, "$2.17m");
+}
+
+#[tokio::test]
+async fn test_get_swap_transactions() {
+    let external = External::new();
+
+    match external.get_swap_transactions().await {
+        Ok(transactions) => {
+            for transaction in transactions {
+                println!(
+                    "Version: {}, Sender: {}, Token Sold: {}, Amount Sold: {}, Token Bought: {}, Amount Bought: {}",
+                    transaction.version,
+                    transaction.sender,
+                    transaction.token_sold,
+                    transaction.token_sold_amount,
+                    transaction.token_bought,
+                    transaction.token_bought_amount
+                );
+            }
+        }
+        Err(e) => {
+            println!("Error fetching transactions: {:?}", e);
+        }
+    }
 }
