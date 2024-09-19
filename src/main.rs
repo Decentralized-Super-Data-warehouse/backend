@@ -14,9 +14,6 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    if dotenv().is_err() {
-        println!("Starting server without .env file.");
-    }
     let app = make_app().await?;
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
     println!("🚀 Server started successfully");

@@ -1,3 +1,4 @@
+use dotenv::dotenv;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
@@ -5,7 +6,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::time::Duration;
 
-use crate::models::{SwapTransaction, TokenTerminalData};
+use crate::{
+    database,
+    models::{MarketCap, SwapTransaction, TokenTerminalData},
+    Config,
+};
 use headless_chrome::{Browser, LaunchOptionsBuilder};
 
 const FULLNODE_API: &str = "https://api.mainnet.aptoslabs.com/v1";
@@ -419,6 +424,59 @@ impl External {
 
         Ok(transactions)
     }
+    pub async fn get_token_supply(
+        &self,
+        address: &str,
+        token: &str,
+    ) -> Result<f64, Box<dyn Error>> {
+        let url =
+            format!("{FULLNODE_API}/accounts/{address}/resource/0x1::coin::CoinInfo<{token}>");
+
+        let response: Value = self.client.get(&url).send().await?.json().await?;
+
+        if let Some(data) = response["data"].as_object() {
+            if let Some(decimals) = data["decimals"].as_u64() {
+                if let Some(supply) =
+                    data["supply"]["vec"][0]["integer"]["vec"][0]["value"].as_str()
+                {
+                    let supply_value: f64 = supply.parse()?;
+                    let adjusted_supply = supply_value / 10f64.powi(decimals as i32);
+                    return Ok(adjusted_supply);
+                }
+            }
+        }
+
+        Err("Failed to get token supply".into())
+    }
+    pub async fn calculate_market_cap(
+        &self,
+        db: &database::PostgreDatabase,
+        address: &str,
+        token: &str,
+        token_address: &str,
+    ) -> Result<MarketCap, Box<dyn Error>> {
+        let client = Client::new();
+
+        // Get the token price
+        let price = match Self::get_price_and_decimals(client.clone(), token).await {
+            Some((price, _)) => price,
+            None => return Err("Failed to get price and decimals".into()),
+        };
+
+        // Get the max supply from the database
+        let project = db.get_project_by_address(address).await?.unwrap();
+
+        let circulating_supply = self.get_token_supply(token_address, token).await?;
+
+        // Calculate fully diluted and normal market caps
+        let fully_diluted = price * (project.token_max_supply.unwrap() as f64);
+        let normal = price * circulating_supply;
+
+        Ok(MarketCap {
+            fully_diluted,
+            normal,
+        })
+    }
 }
 
 #[tokio::test]
@@ -460,6 +518,49 @@ async fn test_get_swap_transactions() {
         }
         Err(e) => {
             println!("Error fetching transactions: {:?}", e);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_get_token_supply() {
+    let external = External::new();
+    let address = "0x159df6b7689437016108a019fd5bef736bac692b6d4a1f10c941f6fbb9a74ca6";
+    let token = "0x159df6b7689437016108a019fd5bef736bac692b6d4a1f10c941f6fbb9a74ca6::oft::CakeOFT";
+
+    match external.get_token_supply(address, token).await {
+        Ok(supply) => {
+            println!("Token Supply: {}", supply);
+        }
+        Err(e) => {
+            println!("Error fetching token supply: {:?}", e);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_calculate_market_cap() {
+    if dotenv().is_err() {
+        println!("Starting server without .env file.");
+    }
+    let config = Config::init();
+    let sqlx_db_connection = database::connect_sqlx(&config.db_url).await;
+    let db = database::PostgreDatabase::new(sqlx_db_connection);
+    let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
+    let token = "0x159df6b7689437016108a019fd5bef736bac692b6d4a1f10c941f6fbb9a74ca6::oft::CakeOFT";
+    let token_address = "0x159df6b7689437016108a019fd5bef736bac692b6d4a1f10c941f6fbb9a74ca6";
+
+    let external = External::new();
+    match external
+        .calculate_market_cap(&db, address, token, token_address)
+        .await
+    {
+        Ok(market_cap) => {
+            println!("Fully Diluted Market Cap: {}", market_cap.fully_diluted);
+            println!("Normal Market Cap: {}", market_cap.normal);
+        }
+        Err(e) => {
+            println!("Error calculating market cap: {:?}", e);
         }
     }
 }

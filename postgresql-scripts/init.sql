@@ -49,6 +49,7 @@ CREATE TABLE project (
     core_developers integer,
     code_commits integer,
     total_value_locked float,
+    token_max_supply bigint,
     created_at timestamp with time zone default current_timestamp not null,
     updated_at timestamp with time zone default current_timestamp not null
 );

@@ -83,6 +83,7 @@ pub async fn create_project_handler(
         core_developers: project.core_developers,
         code_commits: project.code_commits,
         total_value_locked: project.total_value_locked,
+        token_max_supply: project.token_max_supply,
         created_at: project.created_at.to_string(),
         updated_at: project.updated_at.to_string(),
     }))
@@ -189,6 +190,10 @@ pub async fn update_project_handler(
             project.total_value_locked = Some(total_value_locked);
         }
 
+        if let Some(token_max_supply) = body.token_max_supply {
+            project.token_max_supply = Some(token_max_supply);
+        }
+
         // Persist the updated project to the database
         let updated_project = state.db.update_project(&project).await?;
 
@@ -201,6 +206,7 @@ pub async fn update_project_handler(
             core_developers: updated_project.core_developers,
             code_commits: updated_project.code_commits,
             total_value_locked: updated_project.total_value_locked,
+            token_max_supply: updated_project.token_max_supply,
             created_at: updated_project.created_at.to_string(),
             updated_at: updated_project.updated_at.to_string(),
         }))
