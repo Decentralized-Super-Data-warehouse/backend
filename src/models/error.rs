@@ -1,3 +1,5 @@
+use core::fmt;
+
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
@@ -47,5 +49,36 @@ impl From<jsonwebtoken::errors::Error> for Error {
 impl From<argon2::password_hash::errors::Error> for Error {
     fn from(error: argon2::password_hash::errors::Error) -> Self {
         Self::new(StatusCode::BAD_REQUEST, &error.to_string())
+    }
+}
+
+#[derive(Debug)]
+pub enum TokenHolderError {
+    ReqwestError(reqwest::Error),
+    JsonError(serde_json::Error),
+    ApiError(String),
+}
+
+impl fmt::Display for TokenHolderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenHolderError::ReqwestError(e) => write!(f, "Reqwest error: {}", e),
+            TokenHolderError::JsonError(e) => write!(f, "JSON error: {}", e),
+            TokenHolderError::ApiError(e) => write!(f, "API error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for TokenHolderError {}
+
+impl From<reqwest::Error> for TokenHolderError {
+    fn from(error: reqwest::Error) -> Self {
+        TokenHolderError::ReqwestError(error)
+    }
+}
+
+impl From<serde_json::Error> for TokenHolderError {
+    fn from(error: serde_json::Error) -> Self {
+        TokenHolderError::JsonError(error)
     }
 }

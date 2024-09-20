@@ -9,7 +9,7 @@ pub mod user;
 pub use account::Account;
 pub use dex_data::*;
 pub use entity::Entity;
-pub use error::Error;
+pub use error::{Error, TokenHolderError};
 pub use project::Project;
 pub use token_claim::TokenClaim;
 pub use user::User;

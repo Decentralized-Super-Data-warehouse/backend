@@ -1,4 +1,3 @@
-use dotenv::dotenv;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
@@ -8,8 +7,7 @@ use std::time::Duration;
 
 use crate::{
     database,
-    models::{MarketCap, SwapTransaction, TokenTerminalData},
-    Config,
+    models::{MarketCap, SwapTransaction, TokenHolderError, TokenTerminalData},
 };
 use headless_chrome::{Browser, LaunchOptionsBuilder};
 
@@ -477,6 +475,93 @@ impl External {
             normal,
         })
     }
+
+    // ~80 API calls and ~20s
+    pub async fn get_number_of_token_holders(&self, token: &str) -> Result<u64, TokenHolderError> {
+        let mut left = 1u64;
+        let mut right = 1_000_000_000u64;
+
+        while left <= right {
+            println!("{} - {}", left, right);
+            let segment = (right - left + 1) / 10;
+            if segment == 0 {
+                break;
+            }
+
+            let mut tasks = Vec::new();
+            for i in 0..10 {
+                let offset = left + i * segment;
+                let token = token.to_string();
+                let client = self.client.clone();
+                tasks.push(tokio::spawn(async move {
+                    Self::query_coin_balances(&client, &token, offset).await
+                }));
+            }
+
+            let results = futures::future::join_all(tasks).await;
+
+            let mut found = false;
+            for (i, task_result) in results.into_iter().enumerate() {
+                match task_result {
+                    Ok(Ok(count)) if count > 0 && count < 100 => {
+                        let offset = left + i as u64 * segment;
+                        return Ok(offset + count);
+                    }
+                    Ok(Ok(0)) => {
+                        right = left + i as u64 * segment - 1;
+                        left += std::cmp::max(0, i as u64 - 1) * segment;
+                        found = true;
+                        break;
+                    }
+                    Ok(Err(e)) => return Err(e),
+                    Err(e) => return Err(TokenHolderError::ApiError(e.to_string())),
+                    _ => continue,
+                }
+            }
+
+            if !found {
+                left = right - segment + 1;
+            }
+        }
+
+        Ok(left)
+    }
+
+    async fn query_coin_balances(
+        client: &Client,
+        token: &str,
+        offset: u64,
+    ) -> Result<u64, TokenHolderError> {
+        let query = format!(
+            r#"
+            query MyQuery {{
+                current_coin_balances(
+                    offset: {}
+                    limit: 100
+                    where: {{coin_type: {{_eq: "{}"}}, amount: {{_gt: "0"}}}}
+                ) {{
+                    amount
+                }}
+            }}
+            "#,
+            offset, token
+        );
+
+        let response: Value = client
+            .post("https://api.mainnet.aptoslabs.com/v1/graphql")
+            .json(&serde_json::json!({ "query": query }))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        let count = response["data"]["current_coin_balances"]
+            .as_array()
+            .map(|arr| arr.len())
+            .unwrap_or(0);
+
+        Ok(count as u64)
+    }
 }
 
 #[tokio::test]
@@ -540,10 +625,10 @@ async fn test_get_token_supply() {
 
 #[tokio::test]
 async fn test_calculate_market_cap() {
-    if dotenv().is_err() {
+    if dotenv::dotenv().is_err() {
         println!("Starting server without .env file.");
     }
-    let config = Config::init();
+    let config = crate::Config::init();
     let sqlx_db_connection = database::connect_sqlx(&config.db_url).await;
     let db = database::PostgreDatabase::new(sqlx_db_connection);
     let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
@@ -561,6 +646,21 @@ async fn test_calculate_market_cap() {
         }
         Err(e) => {
             println!("Error calculating market cap: {:?}", e);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_get_number_of_token_holders() {
+    let external = External::new();
+    let token = "0x159df6b7689437016108a019fd5bef736bac692b6d4a1f10c941f6fbb9a74ca6::oft::CakeOFT";
+
+    match external.get_number_of_token_holders(token).await {
+        Ok(count) => {
+            println!("Number of token holders: {}", count);
+        }
+        Err(e) => {
+            println!("Error getting number of token holders: {:?}", e);
         }
     }
 }
