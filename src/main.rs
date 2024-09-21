@@ -1,15 +1,16 @@
 mod app_state;
 mod config;
 mod database;
-mod external;
 mod models;
 mod routes;
+pub mod external;
 pub use app_state::AppState;
 pub use config::Config;
+use external::External;
 
 use crate::routes::make_app;
 use dotenv::dotenv;
-use std::error::Error;
+use std::{error::Error, time::Instant};
 use tokio::net::TcpListener;
 
 #[tokio::main]

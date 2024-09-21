@@ -212,6 +212,7 @@ impl External {
         None // If both attempts fail, return None
     }
 
+    
     /// Use headless chrome to extract the data.
     /// Note that it needs to wait for a few seconds (3) to load the data.
     /// Consider increasing it if sometimes the data couldn't be fetched.
@@ -969,6 +970,127 @@ impl External {
 
         Ok(active_users.len())
     }
+
+    async fn get_all_pancake_pairs(client: &Client) -> Option<Vec<(String, String)>> {
+        let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
+        let event_handle = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::SwapInfo";
+        let field_name = "pair_created";
+        let events: Value = client
+            .get(format!(
+                "{FULLNODE_API}/accounts/{address}/events/{event_handle}/{field_name}"
+            ))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+
+        let mut all_pairs: Vec<(String, String)> = Vec::new();
+
+        if let Some(array) = events.as_array() {
+            for obj in array {
+                let token_x = obj["data"]["token_x"].as_str().unwrap().to_string();
+                let token_y = obj["data"]["token_y"].as_str().unwrap().to_string();
+                all_pairs.push((token_x, token_y));
+            }
+        }
+
+        Some(all_pairs)
+    }
+
+    async fn graphql(client: &Client, graphql_query: &String) -> Option<Value> {
+        let result = client
+            .post(format!("{FULLNODE_API}/graphql"))
+            .json(&serde_json::json!({ "query": graphql_query }))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+
+        result
+    }
+
+    async fn calculate_fee(
+        &self,
+        total_coin_swapped: HashMap<String, u64>,
+        numerator: u64,
+        denomerator: u64,
+    ) -> f64 {
+        let mut tasks = Vec::new();
+        let mut total_fee: f64 = 0f64;
+        let divisor = (((denomerator - numerator) as f64) / (denomerator as f64)) / (numerator as f64);
+
+        for (token, amount) in &total_coin_swapped {
+            let token_clone = token.to_string();
+            let amount_clone = *amount;
+            let divisor_clone = divisor;
+            let client = self.client.clone();
+            
+            let task = tokio::task::spawn(async move {
+                if let Some((price, decimals)) =
+                External::get_price_and_decimals(client, &token_clone).await
+                {
+                    let fee_in_token = (amount_clone as f64) / divisor_clone;
+                    (price * fee_in_token as f64) / 10f64.powi(decimals as i32)
+                } else {
+                    0.0
+                }
+            });
+            tasks.push(task);
+        }
+
+        for task in tasks {
+            total_fee += task.await.unwrap_or(0.0);
+        }
+
+        total_fee
+    }
+
+    pub async fn get_total_fee_pancake(&self) -> Result<f64, reqwest::Error> {
+        let all_pairs = Self::get_all_pancake_pairs(&self.client).await.unwrap();
+
+        let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
+
+        let mut total_coin_swapped: HashMap<String, u64> = HashMap::new();
+
+        for (token_x, token_y) in all_pairs {
+            let graphql_query = format!(
+                r#"
+                query MyQuery {{
+                    events(
+                        where: {{indexed_type: {{_eq: "{address}::swap::SwapEvent<{token_x}, {token_y}>"}}}}
+                    ) {{
+                        account_address
+                        creation_number
+                        data
+                    }}
+                }}"#
+            );
+            let swap_events = Self::graphql(&self.client, &graphql_query).await.unwrap();
+            if let Some(array) = swap_events["data"]["events"].as_array() {
+                for obj in array {
+                    // println!("obj: {:?}", obj);
+                    let amount_x_in = &obj["data"]["amount_x_in"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap();
+                    let amount_y_in = &obj["data"]["amount_y_in"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap();
+                    *total_coin_swapped.entry(token_x.to_string()).or_insert(0) += amount_x_in;
+                    *total_coin_swapped.entry(token_y.to_string()).or_insert(0) += amount_y_in;
+                }
+            }
+        }
+
+        Ok(Self::calculate_fee(&self, total_coin_swapped, 25, 10000).await)
+    }
 }
 
 #[tokio::test]
@@ -1115,6 +1237,16 @@ async fn test_get_weekly_active_users() {
 
     match external.get_weekly_active_users(address).await {
         Ok(count) => println!("Number of weekly active users: {}", count),
+        Err(e) => eprintln!("Error: {}", e),
+    }
+}
+
+#[tokio::test]
+async fn test_get_total_fee_pancake() {
+    let external = External::new();
+
+    match external.get_total_fee_pancake().await {
+        Ok(count) => println!("Total fee of pancake: {}", count),
         Err(e) => eprintln!("Error: {}", e),
     }
 }
