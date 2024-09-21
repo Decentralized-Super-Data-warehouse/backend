@@ -1,9 +1,11 @@
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use futures::future::join_all;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::error::Error;
-use std::time::Duration;
+use std::{error::Error, sync::Arc};
+use tokio::sync::Mutex;
 
 use crate::{
     database,
@@ -172,10 +174,11 @@ impl External {
     }
 
     async fn get_balances(client: &Client, token: &str, stablecoin: &str) -> Option<(i64, i64)> {
-        let response: Value = client
+        async fn fetch_balances(client: &Client, token1: &str, token2: &str) -> Option<(i64, i64)> {
+            let response: Value = client
             .get(format!(
                 "{FULLNODE_API}/accounts/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa/resource/0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::TokenPairMetadata<{},{}>",
-                token, stablecoin
+                token1, token2
             ))
             .send()
             .await
@@ -184,16 +187,29 @@ impl External {
             .await
             .ok()?;
 
-        let balance_x: i64 = response["data"]["balance_x"]["value"]
-            .as_str()?
-            .parse()
-            .ok()?;
-        let balance_y: i64 = response["data"]["balance_y"]["value"]
-            .as_str()?
-            .parse()
-            .ok()?;
+            let balance_x: i64 = response["data"]["balance_x"]["value"]
+                .as_str()?
+                .parse()
+                .ok()?;
+            let balance_y: i64 = response["data"]["balance_y"]["value"]
+                .as_str()?
+                .parse()
+                .ok()?;
 
-        Some((balance_x, balance_y))
+            Some((balance_x, balance_y))
+        }
+
+        // Try with original order
+        if let Some(balances) = fetch_balances(client, token, stablecoin).await {
+            return Some(balances);
+        }
+
+        // If original order fails, try with swapped order
+        if let Some((balance_y, balance_x)) = fetch_balances(client, stablecoin, token).await {
+            return Some((balance_x, balance_y)); // Swap back the order of balances
+        }
+
+        None // If both attempts fail, return None
     }
 
     /// Use headless chrome to extract the data.
@@ -213,7 +229,7 @@ impl External {
         ))?;
 
         // Wait for the page to load (consider using a more robust waiting mechanism)
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         // Get the page content
         let html = tab.get_content()?;
@@ -354,7 +370,6 @@ impl External {
                     activity_type
                     amount
                     coin_type
-                    entry_function_id_str
                     coin_info {
                         decimals
                     }
@@ -482,7 +497,7 @@ impl External {
         let mut right = 1_000_000_000u64;
 
         while left <= right {
-            println!("{} - {}", left, right);
+            //println!("{} - {}", left, right);
             let segment = (right - left + 1) / 10;
             if segment == 0 {
                 break;
@@ -548,7 +563,7 @@ impl External {
         );
 
         let response: Value = client
-            .post("https://api.mainnet.aptoslabs.com/v1/graphql")
+            .post(format!("{FULLNODE_API}/graphql"))
             .json(&serde_json::json!({ "query": query }))
             .send()
             .await?
@@ -561,6 +576,171 @@ impl External {
             .unwrap_or(0);
 
         Ok(count as u64)
+    }
+
+    pub async fn calculate_trading_volume(
+        &self,
+        address: &str,
+        entry_function_id: &str,
+    ) -> Result<f64, Box<dyn Error>> {
+        let client = Arc::new(self.client.clone());
+        let coin_volumes: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+        let mut offset = 0;
+        let mut found_old_activity = false;
+        let now = Utc::now();
+        let seven_days_ago = now - Duration::days(7);
+
+        while !found_old_activity {
+            let mut tasks = Vec::new();
+
+            for _ in 0..250 {
+                let client = Arc::clone(&client);
+                let coin_volumes = Arc::clone(&coin_volumes);
+                let address = address.to_string();
+                let entry_function_id = entry_function_id.to_string();
+                let current_offset = offset;
+
+                let task = tokio::spawn(async move {
+                    let query = format!(
+                        r#"
+                        query AccountTransactionsData {{
+                            account_transactions(
+                                offset: {}
+                                limit: 100
+                                where: {{account_address: {{_eq: "{}"}}, user_transaction: {{entry_function_id_str: {{_eq: "{}"}}}}}}
+                                order_by: {{transaction_version: desc}}
+                            ) {{
+                                coin_activities {{
+                                    amount
+                                    coin_info {{
+                                        coin_type
+                                    }}
+                                    transaction_timestamp
+                                }}
+                            }}
+                        }}
+                        "#,
+                        current_offset, address, entry_function_id
+                    );
+
+                    let response: Value = client
+                        .post(format!("{}/graphql", FULLNODE_API))
+                        .json(&serde_json::json!({ "query": query }))
+                        .send()
+                        .await?
+                        .json()
+                        .await?;
+
+                    let mut local_found_old_activity = false;
+
+                    if let Some(transactions) = response["data"]["account_transactions"].as_array()
+                    {
+                        for transaction in transactions {
+                            if let Some(activities) = transaction["coin_activities"].as_array() {
+                                for activity in activities {
+                                    //println!("{}", activity);
+                                    if let Some(raw_timestamp) =
+                                        activity["transaction_timestamp"].as_str()
+                                    {
+                                        // Parse the timestamp using NaiveDateTime
+                                        match NaiveDateTime::parse_from_str(
+                                            raw_timestamp,
+                                            "%Y-%m-%dT%H:%M:%S",
+                                        ) {
+                                            Ok(naive_dt) => {
+                                                let utc_time =
+                                                    DateTime::<Utc>::from_naive_utc_and_offset(
+                                                        naive_dt, Utc,
+                                                    );
+
+                                                if utc_time < seven_days_ago {
+                                                    local_found_old_activity = true;
+                                                    break;
+                                                }
+
+                                                let amount = activity["amount"]
+                                                    .as_u64()
+                                                    .unwrap_or(0);
+                                                let coin_type = activity["coin_info"]["coin_type"]
+                                                    .as_str()
+                                                    .unwrap_or("");
+
+                                                let mut volumes = coin_volumes.lock().await;
+                                                *volumes
+                                                    .entry(coin_type.to_string())
+                                                    .or_insert(0) += amount;
+                                            }
+                                            Err(e) => println!("Failed to parse timestamp: {}", e),
+                                        }
+                                    } else {
+                                        println!("No timestamp found in activity");
+                                    }
+                                }
+                            }
+                            if local_found_old_activity {
+                                break;
+                            }
+                        }
+                    }
+
+                    Ok::<bool, Box<dyn Error + Send + Sync>>(local_found_old_activity)
+                });
+
+                tasks.push(task);
+                offset += 100;
+            }
+
+            let results = join_all(tasks).await;
+            for result in results {
+                match result {
+                    Ok(Ok(local_found_old_activity)) => {
+                        if local_found_old_activity {
+                            found_old_activity = true;
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => return Err(e),
+                    Err(e) => return Err(Box::new(e)),
+                }
+            }
+        }
+
+        let coin_volumes = Arc::try_unwrap(coin_volumes)
+            .expect("Unable to unwrap Arc")
+            .into_inner();
+
+        let mut total_volume_usd = 0.0;
+        let mut price_tasks = Vec::new();
+
+        for (coin_type, volume) in coin_volumes.iter() {
+            let client = self.client.clone();
+            let coin_type = coin_type.clone();
+            let volume = *volume;
+
+            let task = tokio::spawn(async move {
+                if let Some((price, decimals)) =
+                    Self::get_price_and_decimals(client, &coin_type).await
+                {
+                    let volume_usd = price * (volume as f64) / 10f64.powi(decimals as i32);
+                    Ok(volume_usd)
+                } else {
+                    Err(format!("Failed to get price and decimals of {}", &coin_type))
+                }
+            });
+
+            price_tasks.push(task);
+        }
+
+        let results = join_all(price_tasks).await;
+        for result in results {
+            match result {
+                Ok(Ok(volume_usd)) => total_volume_usd += volume_usd,
+                Ok(Err(e)) => eprintln!("Error calculating volume: {}", e),
+                Err(e) => eprintln!("Task error: {}", e),
+            }
+        }
+
+        Ok(total_volume_usd)
     }
 }
 
@@ -661,6 +841,31 @@ async fn test_get_number_of_token_holders() {
         }
         Err(e) => {
             println!("Error getting number of token holders: {:?}", e);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_calculate_trading_volume() {
+    // Initialize the External struct
+    let external = External::new();
+
+    // Set up test parameters
+    let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
+    let entry_function_id = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::router::swap_exact_input";
+
+    // Call the calculate_trading_volume function
+    match external
+        .calculate_trading_volume(address, entry_function_id)
+        .await
+    {
+        Ok(volume) => {
+            println!("Successful calculation:");
+            println!("Total trading volume in the last 7 days: ${:.2}", volume);
+        }
+        Err(e) => {
+            println!("Error occurred during calculation:");
+            println!("Error: {:?}", e);
         }
     }
 }
