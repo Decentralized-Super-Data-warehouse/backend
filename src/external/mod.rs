@@ -3,7 +3,7 @@ use futures::future::join_all;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::{error::Error, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -658,9 +658,8 @@ impl External {
                                                     break;
                                                 }
 
-                                                let amount = activity["amount"]
-                                                    .as_u64()
-                                                    .unwrap_or(0);
+                                                let amount =
+                                                    activity["amount"].as_u64().unwrap_or(0);
                                                 let coin_type = activity["coin_info"]["coin_type"]
                                                     .as_str()
                                                     .unwrap_or("");
@@ -724,7 +723,10 @@ impl External {
                     let volume_usd = price * (volume as f64) / 10f64.powi(decimals as i32);
                     Ok(volume_usd)
                 } else {
-                    Err(format!("Failed to get price and decimals of {}", &coin_type))
+                    Err(format!(
+                        "Failed to get price and decimals of {}",
+                        &coin_type
+                    ))
                 }
             });
 
@@ -741,6 +743,231 @@ impl External {
         }
 
         Ok(total_volume_usd)
+    }
+
+    pub async fn get_daily_active_users(&self, address: &str) -> Result<usize, Box<dyn Error>> {
+        let client = Arc::new(self.client.clone());
+        let mut offset = 0;
+        let mut active_users = HashSet::new();
+        let today = Utc::now().date_naive();
+        let mut found_old_transaction = false;
+
+        while !found_old_transaction {
+            let mut tasks = Vec::new();
+
+            for _ in 0..50 {
+                let client = Arc::clone(&client);
+                let address = address.to_string();
+                let current_offset = offset;
+
+                let task = tokio::spawn(async move {
+                    let query = format!(
+                        r#"
+                        query AccountTransactionsData {{
+                            account_transactions(
+                                offset: {}
+                                limit: 100
+                                where: {{account_address: {{_eq: "{}"}}}},
+                                order_by: {{transaction_version: desc}}
+                            ) {{
+                                user_transaction {{
+                                    sender
+                                    timestamp
+                                }}
+                            }}
+                        }}
+                        "#,
+                        current_offset, address
+                    );
+
+                    let response: Value = client
+                        .post(format!("{}/graphql", FULLNODE_API))
+                        .json(&serde_json::json!({ "query": query }))
+                        .send()
+                        .await?
+                        .json()
+                        .await?;
+
+                    let mut daily_users = HashSet::new();
+                    let mut batch_found_old_transaction = false;
+
+                    if let Some(transactions) = response["data"]["account_transactions"].as_array()
+                    {
+                        for transaction in transactions {
+                            if let Some(user_transaction) =
+                                transaction["user_transaction"].as_object()
+                            {
+                                if let (Some(sender), Some(timestamp)) = (
+                                    user_transaction["sender"].as_str(),
+                                    user_transaction["timestamp"].as_str(),
+                                ) {
+                                    if let Ok(transaction_time) = NaiveDateTime::parse_from_str(
+                                        timestamp,
+                                        "%Y-%m-%dT%H:%M:%S%.f",
+                                    ) {
+                                        let transaction_date = transaction_time.date();
+                                        if transaction_date == today {
+                                            daily_users.insert(sender.to_string());
+                                        } else {
+                                            batch_found_old_transaction = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Ok::<(HashSet<String>, bool), Box<dyn Error + Send + Sync>>((
+                        daily_users,
+                        batch_found_old_transaction,
+                    ))
+                });
+
+                tasks.push(task);
+                offset += 100;
+            }
+
+            let results = join_all(tasks).await;
+
+            for result in results {
+                match result {
+                    Ok(Ok((users, batch_old_transaction))) => {
+                        active_users.extend(users);
+                        if batch_old_transaction {
+                            found_old_transaction = true;
+                        }
+                    }
+                    Ok(Err(e)) => eprintln!("Error in task: {}", e),
+                    Err(e) => eprintln!("Task join error: {}", e),
+                }
+            }
+
+            println!("Processed {} transactions", offset);
+        }
+
+        println!("Total API calls made: {}", offset / 100);
+        println!("Found all transactions for today");
+
+        Ok(active_users.len())
+    }
+
+    pub async fn get_weekly_active_users(&self, address: &str) -> Result<usize, Box<dyn Error>> {
+        let client = Arc::new(self.client.clone());
+        let mut offset = 0;
+        let mut active_users = HashSet::new();
+        let now = Utc::now();
+        let seven_days_ago = (now - Duration::days(7)).date_naive();
+        let mut found_old_transaction = false;
+
+        while !found_old_transaction {
+            let mut tasks = Vec::new();
+
+            for _ in 0..250 {
+                let client = Arc::clone(&client);
+                let address = address.to_string();
+                let current_offset = offset;
+
+                let task = tokio::spawn(async move {
+                    let query = format!(
+                        r#"
+                        query AccountTransactionsData {{
+                            account_transactions(
+                                offset: {}
+                                limit: 100
+                                where: {{account_address: {{_eq: "{}"}}}},
+                                order_by: {{transaction_version: desc}}
+                            ) {{
+                                user_transaction {{
+                                    sender
+                                    timestamp
+                                }}
+                            }}
+                        }}
+                        "#,
+                        current_offset, address
+                    );
+
+                    let response: Value = client
+                        .post(format!("{}/graphql", FULLNODE_API))
+                        .json(&serde_json::json!({ "query": query }))
+                        .send()
+                        .await?
+                        .json()
+                        .await?;
+
+                    let mut weekly_users = HashSet::new();
+                    let mut batch_found_old_transaction = false;
+
+                    if let Some(transactions) = response["data"]["account_transactions"].as_array()
+                    {
+                        for transaction in transactions {
+                            if let Some(user_transaction) =
+                                transaction["user_transaction"].as_object()
+                            {
+                                if let (Some(sender), Some(timestamp)) = (
+                                    user_transaction["sender"].as_str(),
+                                    user_transaction["timestamp"].as_str(),
+                                ) {
+                                    if let Ok(transaction_time) = NaiveDateTime::parse_from_str(
+                                        timestamp,
+                                        "%Y-%m-%dT%H:%M:%S%.f",
+                                    ) {
+                                        let transaction_date = transaction_time.date();
+                                        if transaction_date >= seven_days_ago {
+                                            weekly_users.insert(sender.to_string());
+                                        } else {
+                                            batch_found_old_transaction = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Ok::<(HashSet<String>, bool), Box<dyn Error + Send + Sync>>((
+                        weekly_users,
+                        batch_found_old_transaction,
+                    ))
+                });
+
+                tasks.push(task);
+                offset += 100;
+            }
+
+            let results = join_all(tasks).await;
+
+            for result in results {
+                match result {
+                    Ok(Ok((users, batch_old_transaction))) => {
+                        active_users.extend(users);
+                        if batch_old_transaction {
+                            found_old_transaction = true;
+                        }
+                    }
+                    Ok(Err(e)) => eprintln!("Error in task: {}", e),
+                    Err(e) => eprintln!("Task join error: {}", e),
+                }
+            }
+
+            println!("Processed {} transactions", offset);
+
+            // Break if we've processed a very large number of transactions to prevent infinite loops
+            if offset >= 500_000 {
+                println!("Reached 500,000 transactions processed. Stopping to prevent excessive API calls.");
+                break;
+            }
+        }
+
+        println!("Total API calls made: {}", offset / 100);
+        if found_old_transaction {
+            println!("Found all transactions for the last 7 days");
+        } else {
+            println!("Warning: Stopped due to large number of transactions. May not have all 7 days of data.");
+        }
+
+        Ok(active_users.len())
     }
 }
 
@@ -867,5 +1094,27 @@ async fn test_calculate_trading_volume() {
             println!("Error occurred during calculation:");
             println!("Error: {:?}", e);
         }
+    }
+}
+
+#[tokio::test]
+async fn test_get_daily_active_users() {
+    let external = External::new();
+    let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
+
+    match external.get_daily_active_users(address).await {
+        Ok(count) => println!("Number of daily active users: {}", count),
+        Err(e) => eprintln!("Error: {}", e),
+    }
+}
+
+#[tokio::test]
+async fn test_get_weekly_active_users() {
+    let external = External::new();
+    let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
+
+    match external.get_weekly_active_users(address).await {
+        Ok(count) => println!("Number of weekly active users: {}", count),
+        Err(e) => eprintln!("Error: {}", e),
     }
 }
