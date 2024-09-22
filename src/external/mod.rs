@@ -212,7 +212,6 @@ impl External {
         None // If both attempts fail, return None
     }
 
-    
     /// Use headless chrome to extract the data.
     /// Note that it needs to wait for a few seconds (3) to load the data.
     /// Consider increasing it if sometimes the data couldn't be fetched.
@@ -230,7 +229,7 @@ impl External {
         ))?;
 
         // Wait for the page to load (consider using a more robust waiting mechanism)
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
         // Get the page content
         let html = tab.get_content()?;
@@ -240,19 +239,15 @@ impl External {
         let (ath, ath_last, atl, atl_last) = self.scrape_ath_atl(&document)?;
 
         // Scrape financial data
-        let (revenue_30d, revenue_annualized, expenses_30d, earnings_30d) =
-            self.scrape_financials(&document)?;
+        let mut data = self.scrape_financials(&document)?;
 
-        Ok(TokenTerminalData {
-            ath,
-            ath_last,
-            atl,
-            atl_last,
-            revenue_30d,
-            revenue_annualized,
-            expenses_30d,
-            earnings_30d,
-        })
+        // Add ATH/ATL data to the TokenTerminalData struct
+        data.ath = ath;
+        data.ath_last = ath_last;
+        data.atl = atl;
+        data.atl_last = atl_last;
+
+        Ok(data)
     }
 
     fn scrape_ath_atl(
@@ -284,74 +279,43 @@ impl External {
         Ok((ath, ath_last, atl, atl_last))
     }
 
-    fn scrape_financials(
-        &self,
-        document: &Html,
-    ) -> Result<(String, String, String, String), Box<dyn Error>> {
+    fn scrape_financials(&self, document: &Html) -> Result<TokenTerminalData, Box<dyn Error>> {
         let li_selector = Selector::parse("li")?;
         let div_selector = Selector::parse("div")?;
-        let mut revenue_30d = String::new();
-        let mut revenue_annualized = String::new();
-        let mut expenses_30d = String::new();
-        let mut earnings_30d = String::new();
+        let mut data = TokenTerminalData::default();
 
         for li in document.select(&li_selector) {
             let mut divs = li.select(&div_selector);
+            if let (Some(label_div), Some(value_div)) = (divs.next(), divs.next()) {
+                let label = label_div.text().collect::<String>();
+                let value = value_div
+                    .text()
+                    .collect::<Vec<_>>()
+                    .first()
+                    .cloned()
+                    .unwrap_or_default()
+                    .to_owned();
 
-            if let Some(label_div) = divs.next() {
-                let label_text = label_div.text().collect::<String>();
-
-                if label_text.contains("Revenue (30d)") {
-                    if let Some(value_div) = divs.next() {
-                        revenue_30d = value_div
-                            .text()
-                            .collect::<Vec<_>>()
-                            .first()
-                            .cloned()
-                            .unwrap_or_default()
-                            .to_owned();
+                match label.as_str() {
+                    l if l.contains("Revenue (30d)") => data.revenue_30d = value,
+                    l if l.contains("Revenue (annualized)") => data.revenue_annualized = value,
+                    l if l.contains("Expenses (30d)") => data.expenses_30d = value,
+                    l if l.contains("Earnings (30d)") => data.earnings_30d = value,
+                    l if l.contains("Fees (30d)") => data.fees_30d = value,
+                    l if l.contains("Fees (annualized)") => data.fees_annualized = value,
+                    l if l.contains("Token incentives (30d)") => data.token_incentives_30d = value,
+                    l if l.contains("Active users (monthly)") => data.monthly_active_users = value,
+                    l if l.contains("Average fees per user (AFPU)") => data.afpu = value,
+                    l if l.contains("Average revenue per user (ARPU)") => data.arpu = value,
+                    l if l.contains("Token trading volume (30d)") => {
+                        data.token_trading_volume_30d = value
                     }
-                }
-
-                if label_text.contains("Revenue (annualized)") {
-                    if let Some(value_div) = divs.next() {
-                        revenue_annualized = value_div
-                            .text()
-                            .collect::<Vec<_>>()
-                            .first()
-                            .cloned()
-                            .unwrap_or_default()
-                            .to_owned();
-                    }
-                }
-
-                if label_text.contains("Expenses (30d)") {
-                    if let Some(value_div) = divs.next() {
-                        expenses_30d = value_div
-                            .text()
-                            .collect::<Vec<_>>()
-                            .first()
-                            .cloned()
-                            .unwrap_or_default()
-                            .to_owned();
-                    }
-                }
-
-                if label_text.contains("Earnings (30d)") {
-                    if let Some(value_div) = divs.next() {
-                        earnings_30d = value_div
-                            .text()
-                            .collect::<Vec<_>>()
-                            .first()
-                            .cloned()
-                            .unwrap_or_default()
-                            .to_owned();
-                    }
+                    _ => {}
                 }
             }
         }
 
-        Ok((revenue_30d, revenue_annualized, expenses_30d, earnings_30d))
+        Ok(data)
     }
 
     /// Get 25 latest transactions impacting PancakeSwap
@@ -973,7 +937,8 @@ impl External {
 
     async fn get_all_pancake_pairs(client: &Client) -> Option<Vec<(String, String)>> {
         let address = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa";
-        let event_handle = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::SwapInfo";
+        let event_handle =
+            "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::SwapInfo";
         let field_name = "pair_created";
         let events: Value = client
             .get(format!(
@@ -1021,17 +986,18 @@ impl External {
     ) -> f64 {
         let mut tasks = Vec::new();
         let mut total_fee: f64 = 0f64;
-        let divisor = (((denomerator - numerator) as f64) / (denomerator as f64)) / (numerator as f64);
+        let divisor =
+            (((denomerator - numerator) as f64) / (denomerator as f64)) / (numerator as f64);
 
         for (token, amount) in &total_coin_swapped {
             let token_clone = token.to_string();
             let amount_clone = *amount;
             let divisor_clone = divisor;
             let client = self.client.clone();
-            
+
             let task = tokio::task::spawn(async move {
                 if let Some((price, decimals)) =
-                External::get_price_and_decimals(client, &token_clone).await
+                    External::get_price_and_decimals(client, &token_clone).await
                 {
                     let fee_in_token = (amount_clone as f64) / divisor_clone;
                     (price * fee_in_token as f64) / 10f64.powi(decimals as i32)
@@ -1106,10 +1072,17 @@ async fn test_get_data_from_tokenterminal() {
     assert_eq!(result.ath_last, "3.4y ago");
     assert_eq!(result.atl, "$0.2234");
     assert_eq!(result.atl_last, "3.9y ago");
-    assert_eq!(result.revenue_30d, "$4.24m");
-    assert_eq!(result.revenue_annualized, "$51.54m");
-    assert_eq!(result.expenses_30d, "$2.07m");
-    assert_eq!(result.earnings_30d, "$2.17m");
+    assert_eq!(result.revenue_30d, "$4.32m");
+    assert_eq!(result.revenue_annualized, "$52.56m");
+    assert_eq!(result.expenses_30d, "$2.08m");
+    assert_eq!(result.earnings_30d, "$2.24m");
+    assert_eq!(result.fees_30d, "$13.30m");
+    assert_eq!(result.fees_annualized, "$161.79m");
+    assert_eq!(result.token_incentives_30d, "$2.08m");
+    assert_eq!(result.monthly_active_users, "1.98m");
+    assert_eq!(result.afpu, "$1.62");
+    assert_eq!(result.arpu, "$0.5293");
+    assert_eq!(result.token_trading_volume_30d, "$1.29b");
 }
 
 #[tokio::test]

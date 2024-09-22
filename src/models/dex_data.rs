@@ -20,6 +20,13 @@ pub struct TokenTerminalData {
     pub revenue_annualized: String,
     pub expenses_30d: String,
     pub earnings_30d: String,
+    pub fees_30d: String,
+    pub fees_annualized: String,
+    pub token_incentives_30d: String,
+    pub monthly_active_users: String,
+    pub afpu: String,
+    pub arpu: String,
+    pub token_trading_volume_30d: String,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
