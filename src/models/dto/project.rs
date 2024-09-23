@@ -17,6 +17,7 @@ pub struct UpdateProject {
     pub core_developers: Option<i32>,
     pub code_commits: Option<i32>,
     pub total_value_locked: Option<f64>,
+    pub token_max_supply: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -29,6 +30,7 @@ pub struct ProjectResponse {
     pub core_developers: Option<i32>,
     pub code_commits: Option<i32>,
     pub total_value_locked: Option<f64>,
+    pub token_max_supply: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }

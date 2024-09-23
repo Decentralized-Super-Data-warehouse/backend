@@ -1,22 +1,26 @@
+mod account;
+mod entity;
 mod health;
 mod middlewares;
+mod project;
 mod swagger;
 mod user;
-mod entity;
-mod account;
-mod project;
 use crate::database;
 use health::health_checker_handler;
-use tracing::info;
 use tower_http::trace::TraceLayer;
+use tracing::info;
 
 use crate::{AppState, Config};
 
 use axum::{routing::get, Router};
+use dotenv::dotenv;
 use std::error::Error;
 use std::sync::Arc;
 
 pub async fn make_app() -> Result<Router, Box<dyn Error>> {
+    if dotenv().is_err() {
+        println!("Starting server without .env file.");
+    }
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
