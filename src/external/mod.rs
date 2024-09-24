@@ -319,29 +319,41 @@ impl External {
     }
 
     /// Get 25 latest transactions impacting PancakeSwap
-    pub async fn get_swap_transactions(&self) -> Result<Vec<SwapTransaction>, Box<dyn Error>> {
-        let graphql_query = r#"
-        query AccountTransactionsData {
+    pub async fn get_swap_transactions(
+        &self,
+        account_address: &str,
+        entry_function_id_str: &str,
+    ) -> Result<Vec<SwapTransaction>, reqwest::Error> {
+        // GraphQL query with dynamic parameters
+        let graphql_query = format!(
+            r#"
+        query AccountTransactionsData {{
             account_transactions(
                 limit: 25
-                where: {account_address: {_eq: "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa"}, user_transaction: {entry_function_id_str: {_eq: "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::router::swap_exact_input"}}}
-                order_by: {transaction_version: desc}
-            ) {
+                where: {{
+                    account_address: {{_eq: "{}"}}, 
+                    user_transaction: {{entry_function_id_str: {{_eq: "{}"}}}}
+                }}
+                order_by: {{transaction_version: desc}}
+            ) {{
                 transaction_version
-                user_transaction {
+                user_transaction {{
                     sender
-                }
-                coin_activities {
+                }}
+                coin_activities {{
                     activity_type
                     amount
                     coin_type
-                    coin_info {
+                    coin_info {{
                         decimals
-                    }
-                }
-            }
-        }"#;
+                    }}
+                }}
+            }}
+        }}"#,
+            account_address, entry_function_id_str
+        );
 
+        // Sending the GraphQL query to the server
         let response: Value = self
             .client
             .post(format!("{}/graphql", FULLNODE_API))
@@ -353,6 +365,7 @@ impl External {
 
         let mut transactions = Vec::new();
 
+        // Parsing the response and creating SwapTransaction objects
         if let Some(array) = response["data"]["account_transactions"].as_array() {
             for transaction in array {
                 let version = transaction["transaction_version"].as_i64().unwrap_or(0);
@@ -360,6 +373,7 @@ impl External {
                     .as_str()
                     .unwrap_or("")
                     .to_string();
+
                 let mut token_sold = String::new();
                 let mut token_sold_amount = 0.0;
                 let mut token_bought = String::new();
@@ -447,7 +461,10 @@ impl External {
         let circulating_supply = self.get_token_supply(token_address, token).await?;
 
         // Calculate fully diluted and normal market caps
-        let fully_diluted = price * (project.token_max_supply.unwrap() as f64);
+        let fully_diluted = match project.get_int("token_max_supply") {
+            Some(max_supply) => price * (max_supply as f64),
+            None => 0.0, // or some other default value or handling logic
+        };
         let normal = price * circulating_supply;
 
         Ok(MarketCap {
@@ -489,7 +506,11 @@ impl External {
                     }
                     Ok(Ok(0)) => {
                         right = left + i as u64 * segment - 1;
-                        left += std::cmp::max(0, i as u64 - 1) * segment;
+                        left = if i > 0 {
+                            left + (i as u64 - 1) * segment
+                        } else {
+                            left
+                        };
                         found = true;
                         break;
                     }
@@ -1005,14 +1026,19 @@ impl External {
             i += 1;
         }
 
-        (input[0..comma_position].to_owned(), input[comma_position + 1..].to_owned())
+        (
+            input[0..comma_position].to_owned(),
+            input[comma_position + 1..].to_owned(),
+        )
     }
     pub async fn get_fee_within_n_days_pancake(&self, day: i64) -> Result<f64, reqwest::Error> {
         let now = Utc::now();
         let n_days_ago = (now - Duration::days(day)).date_naive();
         let mut offset = 0;
 
-        const SWAPEVENT_NAME_LENGTH: usize = "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::SwapEvent".len();
+        const SWAPEVENT_NAME_LENGTH: usize =
+            "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::SwapEvent"
+                .len();
         let mut tasks = Vec::new();
 
         // this 250 cap is not enough, should save this to db
@@ -1034,15 +1060,16 @@ impl External {
                         }}
                     }}"#
                 );
-                
-                if let Some(swap_events) =  Self::graphql(&client_clone, &graphql_query).await {
+
+                if let Some(swap_events) = Self::graphql(&client_clone, &graphql_query).await {
                     if let Some(array) = swap_events["data"]["events"].as_array() {
                         if array.is_empty() {
                             return (Vec::new(), None);
                         }
                         // query transaction with this transaction_version to check timestamp
-                        let transaction_version =
-                            array.last().unwrap()["transaction_version"].as_number().unwrap();
+                        let transaction_version = array.last().unwrap()["transaction_version"]
+                            .as_number()
+                            .unwrap();
                         let graphql_query = format!(
                             r#"
                             query MyQuery {{
@@ -1066,11 +1093,9 @@ impl External {
                         let timestamp = &transaction["user_transaction"]["timestamp"]
                             .as_str()
                             .unwrap();
-                        let transaction_time = NaiveDateTime::parse_from_str(
-                            timestamp,
-                            "%Y-%m-%dT%H:%M:%S%.f",
-                        )
-                        .unwrap();
+                        let transaction_time =
+                            NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.f")
+                                .unwrap();
                         let transaction_date = transaction_time.date();
                         if transaction_date <= n_days_ago {
                             return (Vec::new(), Some(transaction_date));
@@ -1090,7 +1115,8 @@ impl External {
                             let indexed_type = obj["indexed_type"].as_str().unwrap();
                             let indexed_type = indexed_type.replace(" ", "");
                             // +1 for the '<' and -1 for the '>'
-                            let (_unused, pair_name) = indexed_type.split_at(SWAPEVENT_NAME_LENGTH + 1);
+                            let (_unused, pair_name) =
+                                indexed_type.split_at(SWAPEVENT_NAME_LENGTH + 1);
                             let pair_name = &pair_name[..(pair_name.len() - 1)];
                             let (token_x, token_y) = Self::get_token_name_from_pair(&pair_name);
                             if *amount_x_in > 0 {
@@ -1103,10 +1129,7 @@ impl External {
                         return (local_coin_swaps, Some(transaction_date));
                     }
                 }
-                (
-                    Vec::new(),
-                    None
-                )
+                (Vec::new(), None)
             });
             tasks.push(task);
             offset += 100;
@@ -1115,10 +1138,8 @@ impl External {
         let mut total_coin_swapped: HashMap<String, u64> = HashMap::new();
         let mut optional_earliest_day_found = None;
         for task in tasks {
-            let (local_total_coin_swapped, optional_day) =
-                task.await
-                    .unwrap_or((Vec::new(), None));
-            
+            let (local_total_coin_swapped, optional_day) = task.await.unwrap_or((Vec::new(), None));
+
             if optional_day.is_some() {
                 optional_earliest_day_found = optional_day;
             };
@@ -1167,7 +1188,7 @@ async fn test_get_data_from_tokenterminal() {
 async fn test_get_swap_transactions() {
     let external = External::new();
 
-    match external.get_swap_transactions().await {
+    match external.get_swap_transactions("0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa", "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::router::swap_exact_input").await {
         Ok(transactions) => {
             for transaction in transactions {
                 println!(

@@ -1,4 +1,5 @@
-use crate::models::{Account, Entity, Project, User};
+use crate::models::{project::ProjectAttribute, Account, Entity, Project, User};
+use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, PgPool, Result};
 
 /// Connects to a PostgreSQL database with the given `db_url`, returning a connection pool for accessing it
@@ -188,10 +189,10 @@ impl PostgreDatabase {
 
     /// Fetch a project by its ID
     pub async fn get_project_by_id(&self, id: i32) -> Result<Option<Project>, sqlx::Error> {
-        let result = sqlx::query_as!(
-            Project,
+        let project = sqlx::query!(
             r#"
-            SELECT * FROM project
+            SELECT *
+            FROM project
             WHERE id = $1
             "#,
             id
@@ -199,17 +200,62 @@ impl PostgreDatabase {
         .fetch_optional(&self.sqlx_db)
         .await?;
 
-        Ok(result)
+        if let Some(p) = project {
+            let attributes = self.get_project_attributes(id).await?;
+            Ok(Some(Project {
+                id: p.id,
+                name: p.name,
+                token: p.token,
+                category: p.category,
+                contract_address: p.contract_address,
+                created_at: p.created_at,
+                updated_at: p.updated_at,
+                attributes,
+            }))
+        } else {
+            Ok(None)
+        }
     }
+
+    /// Fetch a project by its name
+    pub async fn get_project_by_name(&self, name: &str) -> Result<Option<Project>, sqlx::Error> {
+        let project = sqlx::query!(
+            r#"
+            SELECT *
+            FROM project
+            WHERE name = $1
+            "#,
+            name
+        )
+        .fetch_optional(&self.sqlx_db)
+        .await?;
+
+        if let Some(p) = project {
+            let attributes = self.get_project_attributes(p.id).await?;
+            Ok(Some(Project {
+                id: p.id,
+                name: p.name,
+                token: p.token,
+                category: p.category,
+                contract_address: p.contract_address,
+                created_at: p.created_at,
+                updated_at: p.updated_at,
+                attributes,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Fetch a project by its contract address
     pub async fn get_project_by_address(
         &self,
         address: &str,
     ) -> Result<Option<Project>, sqlx::Error> {
-        let result = sqlx::query_as!(
-            Project,
+        let project = sqlx::query!(
             r#"
-            SELECT * FROM project
+            SELECT *
+            FROM project
             WHERE contract_address = $1
             "#,
             address
@@ -217,57 +263,183 @@ impl PostgreDatabase {
         .fetch_optional(&self.sqlx_db)
         .await?;
 
-        Ok(result)
+        if let Some(p) = project {
+            let attributes = self.get_project_attributes(p.id).await?;
+            Ok(Some(Project {
+                id: p.id,
+                name: p.name,
+                token: p.token,
+                category: p.category,
+                contract_address: p.contract_address,
+                created_at: p.created_at,
+                updated_at: p.updated_at,
+                attributes,
+            }))
+        } else {
+            Ok(None)
+        }
     }
+
     /// Create a new project
     pub async fn create_project(&self, project: &Project) -> Result<Project, sqlx::Error> {
-        let result = sqlx::query_as!(
-            Project,
+        // Start a new transaction
+        let mut transaction = self.sqlx_db.begin().await?;
+
+        let new_project = sqlx::query!(
             r#"
-            INSERT INTO project (token, category, contract_address)
-            VALUES ($1, $2, $3)
+            INSERT INTO project (name, token, category, contract_address)
+            VALUES ($1, $2, $3, $4)
             RETURNING *
             "#,
-            project.token,
-            project.category,
-            project.contract_address,
+            project.name, project.token, project.category, project.contract_address,
         )
-        .fetch_one(&self.sqlx_db)
+        .fetch_one(&mut *transaction)
         .await?;
 
-        Ok(result)
+        for attr in &project.attributes {
+            sqlx::query!(
+                r#"
+                INSERT INTO project_attribute (project_id, key, value, value_type)
+                VALUES ($1, $2, $3, $4)
+                "#,
+                new_project.id,
+                attr.key,
+                attr.value.to_string(),
+                get_value_type(&attr.value)
+            )
+            .execute(&mut *transaction)
+            .await?;
+        }
+
+        transaction.commit().await?;
+
+        Ok(Project {
+            id: new_project.id,
+            name: new_project.name,
+            token: new_project.token,
+            category: new_project.category,
+            contract_address: new_project.contract_address,
+            created_at: new_project.created_at,
+            updated_at: new_project.updated_at,
+            attributes: project.attributes.clone(),
+        })
     }
+
     /// Update an existing project
     pub async fn update_project(&self, project: &Project) -> Result<Project, sqlx::Error> {
-        let result = sqlx::query_as!(
-            Project,
+        // Start a new transaction
+        let mut transaction = self.sqlx_db.begin().await?;
+
+        let updated_project = sqlx::query!(
+        r#"
+        UPDATE project
+        SET name = $1, token = $2, category = $3, contract_address = $4, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $5
+        RETURNING *
+        "#,
+        project.name, project.token, project.category, project.contract_address, project.id
+    )
+    .fetch_one(&mut *transaction) // Note: `&mut *transaction` is used here
+    .await?;
+
+        // Delete existing attributes
+        sqlx::query!(
             r#"
-            UPDATE project
-            SET token = $1,
-                category = $2,
-                contract_address = $3,
-                num_chains = $4,
-                core_developers = $5,
-                code_commits = $6,
-                total_value_locked = $7,
-                token_max_supply = $8,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $9
-            RETURNING *
-            "#,
-            project.token,
-            project.category,
-            project.contract_address,
-            project.num_chains,
-            project.core_developers,
-            project.code_commits,
-            project.total_value_locked,
-            project.token_max_supply,
+        DELETE FROM project_attribute
+        WHERE project_id = $1
+        "#,
             project.id
         )
-        .fetch_one(&self.sqlx_db)
+        .execute(&mut *transaction) // Note: `&mut *transaction` is used here
         .await?;
 
-        Ok(result)
+        // Insert new attributes
+        for attr in &project.attributes {
+            sqlx::query!(
+                r#"
+            INSERT INTO project_attribute (project_id, key, value, value_type)
+            VALUES ($1, $2, $3, $4)
+            "#,
+                project.id,
+                attr.key,
+                attr.value.to_string(),
+                get_value_type(&attr.value)
+            )
+            .execute(&mut *transaction) // Note: `&mut *transaction` is used here
+            .await?;
+        }
+
+        transaction.commit().await?;
+
+        Ok(Project {
+            id: updated_project.id,
+            name: updated_project.name,
+            token: updated_project.token,
+            category: updated_project.category,
+            contract_address: updated_project.contract_address,
+            created_at: updated_project.created_at,
+            updated_at: updated_project.updated_at,
+            attributes: project.attributes.clone(),
+        })
+    }
+
+    /// Get project attributes
+    async fn get_project_attributes(
+        &self,
+        project_id: i32,
+    ) -> Result<Vec<ProjectAttribute>, sqlx::Error> {
+        let attributes = sqlx::query!(
+            r#"
+            SELECT key, value, value_type
+            FROM project_attribute
+            WHERE project_id = $1
+            "#,
+            project_id
+        )
+        .fetch_all(&self.sqlx_db)
+        .await?;
+
+        Ok(attributes
+            .into_iter()
+            .map(|attr| ProjectAttribute {
+                key: attr.key,
+                // If `attr.value` is `None`, provide a default value (e.g., an empty string).
+                value: parse_value(attr.value.as_deref().unwrap_or(""), &attr.value_type),
+            })
+            .collect())
+    }
+}
+
+fn get_value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(n) => {
+            if n.is_i64() {
+                "integer"
+            } else {
+                "float"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn parse_value(value: &str, value_type: &str) -> Value {
+    match value_type {
+        "null" => Value::Null,
+        "boolean" => value.parse().map(Value::Bool).unwrap_or(Value::Bool(false)),
+        "integer" => value
+            .parse()
+            .map(Value::Number)
+            .unwrap_or(Value::Number(0.into())),
+        "float" => serde_json::Number::from_f64(value.parse().unwrap_or(0.0))
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        "string" => Value::String(value.to_string()),
+        "array" | "object" => serde_json::from_str(value).unwrap_or(Value::Null),
+        _ => Value::Null,
     }
 }

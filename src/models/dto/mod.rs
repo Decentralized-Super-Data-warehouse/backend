@@ -3,11 +3,13 @@ pub mod user;
 pub mod entity;
 pub mod account;
 pub mod project;
+pub mod dex_data;
 pub use message::Message;
 pub use user::*;
 pub use entity::*;
 pub use account::*;
 pub use project::*;
+pub use dex_data::*;
 
 use utoipa::{
     openapi::security::{Http, HttpAuthScheme, SecurityScheme},
