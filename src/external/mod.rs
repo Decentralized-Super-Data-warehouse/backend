@@ -55,32 +55,21 @@ impl External {
             for obj in array {
                 if let Some(obj_type) = obj.get("type").and_then(Value::as_str) {
                     if obj_type.contains("swap::TokenPairReserve") {
-                        let tokens = obj_type
-                            .split("::swap::TokenPairReserve<")
-                            .nth(1)
-                            .and_then(|s| s.split('>').next())
-                            .unwrap_or("")
-                            .split(", ");
-
                         if let Some(data) = obj.get("data").and_then(Value::as_object) {
                             if let (Some(reserve_x), Some(reserve_y)) =
-                                (data.get("reserve_x"), data.get("reserve_y"))
+                            (data.get("reserve_x"), data.get("reserve_y"))
                             {
                                 if let (Some(reserve_x_str), Some(reserve_y_str)) =
-                                    (reserve_x.as_str(), reserve_y.as_str())
+                                (reserve_x.as_str(), reserve_y.as_str())
                                 {
                                     let reserve_x_value = reserve_x_str.parse::<u64>().unwrap_or(0);
                                     let reserve_y_value = reserve_y_str.parse::<u64>().unwrap_or(0);
-
-                                    let mut tokens_iter = tokens.into_iter();
-                                    if let Some(token_x) = tokens_iter.next() {
-                                        *reserves.entry(token_x.to_string()).or_insert(0) +=
-                                            reserve_x_value;
-                                    }
-                                    if let Some(token_y) = tokens_iter.next() {
-                                        *reserves.entry(token_y.to_string()).or_insert(0) +=
-                                            reserve_y_value;
-                                    }
+                                    
+                                    let (token_x, token_y) = Self::get_token_names_from_type(obj_type);
+                                    *reserves.entry(token_x.to_string()).or_insert(0) +=
+                                        reserve_x_value;
+                                    *reserves.entry(token_y.to_string()).or_insert(0) +=
+                                        reserve_y_value;
                                 }
                             }
                         }
@@ -975,45 +964,18 @@ impl External {
             .ok()?
     }
 
-    async fn calculate_fee(
-        &self,
-        total_coin_swapped: HashMap<String, u64>,
-        numerator: u64,
-        denomerator: u64,
-    ) -> f64 {
-        let mut tasks = Vec::new();
-        let mut total_fee: f64 = 0f64;
-        let divisor =
-            (((denomerator - numerator) as f64) / (denomerator as f64)) / (numerator as f64);
-
-        for (token, amount) in &total_coin_swapped {
-            let token_clone = token.to_string();
-            let amount_clone = *amount;
-            let divisor_clone = divisor;
-            let client = self.client.clone();
-
-            let task = tokio::task::spawn(async move {
-                if let Some((price, decimals)) =
-                    Self::get_price_and_decimals(client, &token_clone).await
-                {
-                    let fee_in_token = (amount_clone as f64) / divisor_clone;
-                    (price * fee_in_token) / 10f64.powi(decimals as i32)
-                } else {
-                    0.0
-                }
-            });
-            tasks.push(task);
+    // from "ABC<DEF>" -> "DEF", additionaly remove space
+    fn get_generic_type(input: &str) -> String {
+        let input = input.replace(" ", "");
+        if let Some(pos) = input.find('<') {
+            input[pos + 1..input.len() - 1].to_string()
+        } else {
+            input.to_string()
         }
-
-        for task in tasks {
-            total_fee += task.await.unwrap_or(0.0);
-        }
-
-        total_fee
     }
 
     // pair has syntax of "tokenA,tokenB"
-    fn get_token_name_from_pair(input: &str) -> (String, String) {
+    fn get_token_names_from_pair(input: &str) -> (String, String) {
         let mut num_open_bracket = 0;
         let mut comma_position = 0;
 
@@ -1034,14 +996,18 @@ impl External {
             input[comma_position + 1..].to_owned(),
         )
     }
+
+    // get full tokenA, tokenB from "address::name::type<tokenA, tokenB>"
+    fn get_token_names_from_type(input: &str) -> (String, String) {
+        let input = Self::get_generic_type(input);
+        Self::get_token_names_from_pair(input.as_str())
+    }
+
     pub async fn get_fee_within_n_days_pancake(&self, day: i64) -> Result<f64, reqwest::Error> {
         let now = Utc::now();
         let n_days_ago = (now - Duration::days(day)).date_naive();
         let mut offset = 0;
 
-        const SWAPEVENT_NAME_LENGTH: usize =
-            "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::swap::SwapEvent"
-                .len();
         let mut tasks = Vec::new();
 
         // this 250 cap is not enough, should save this to db
@@ -1116,12 +1082,7 @@ impl External {
                                 .parse::<u64>()
                                 .unwrap();
                             let indexed_type = obj["indexed_type"].as_str().unwrap();
-                            let indexed_type = indexed_type.replace(" ", "");
-                            // +1 for the '<' and -1 for the '>'
-                            let (_unused, pair_name) =
-                                indexed_type.split_at(SWAPEVENT_NAME_LENGTH + 1);
-                            let pair_name = &pair_name[..(pair_name.len() - 1)];
-                            let (token_x, token_y) = Self::get_token_name_from_pair(pair_name);
+                            let (token_x, token_y) = Self::get_token_names_from_type(indexed_type);
                             if *amount_x_in > 0 {
                                 local_coin_swaps.push((token_x, *amount_x_in));
                             };
@@ -1159,6 +1120,47 @@ impl External {
 
         Ok(Self::calculate_fee(self, total_coin_swapped, 25, 10000).await)
     }
+
+    async fn calculate_fee(
+        &self,
+        total_coin_swapped: HashMap<String, u64>,
+        numerator: u64,
+        denomerator: u64,
+    ) -> f64 {
+        let mut tasks = Vec::new();
+        let mut total_fee: f64 = 0f64;
+        // fee is (numerator) / (denomerator)
+        // value after fee is (denomerator - numerator) / (denomerator)
+        // value after fee -> fee is (value after fee / (denomerator - numerator)) * (numerator) = (value after fee) / ((denomerator - numerator) / numerator)
+        let divisor =
+            ((denomerator - numerator) as f64) / (numerator as f64);
+
+        for (token, amount) in &total_coin_swapped {
+            let token_clone = token.to_string();
+            let amount_clone = *amount;
+            let divisor_clone = divisor;
+            let client = self.client.clone();
+
+            let task = tokio::task::spawn(async move {
+                if let Some((price, decimals)) =
+                    Self::get_price_and_decimals(client, &token_clone).await
+                {
+                    let fee_in_token = (amount_clone as f64) / divisor_clone;
+                    (price * fee_in_token) / 10f64.powi(decimals as i32)
+                } else {
+                    0.0
+                }
+            });
+            tasks.push(task);
+        }
+
+        for task in tasks {
+            total_fee += task.await.unwrap_or(0.0);
+        }
+
+        total_fee
+    }
+
     pub async fn fetch_coin_balances(&self, address: &str) -> Result<Vec<Coin>, reqwest::Error> {
         let query = format!(
             r#"
