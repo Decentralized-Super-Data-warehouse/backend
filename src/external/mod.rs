@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use futures::future::join_all;
 use reqwest::Client;
 use scraper::{Html, Selector};
@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::{error::Error, sync::Arc};
 use tokio::sync::Mutex;
 
+use crate::models::dto::{Coin, CoinBalanceResponse, Transaction, TransactionResponse};
 use crate::{
     database,
     models::{MarketCap, SwapTransaction, TokenHolderError, TokenTerminalData},
@@ -21,7 +22,13 @@ pub const USDC: &str =
 const DECIMALS_USD: u8 = 6;
 
 pub struct External {
-    client: Client,
+    pub client: Client,
+}
+
+impl Default for External {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl External {
@@ -116,7 +123,7 @@ impl External {
         total_value_locked
     }
 
-    async fn get_price_and_decimals(client: Client, token: &str) -> Option<(f64, u8)> {
+    pub async fn get_price_and_decimals(client: Client, token: &str) -> Option<(f64, u8)> {
         if token == USDT || token == USDC {
             return Some((1.0, DECIMALS_USD));
         }
@@ -957,17 +964,15 @@ impl External {
     }
 
     async fn graphql(client: &Client, graphql_query: &String) -> Option<Value> {
-        let result = client
-            .post(format!("https://indexer.mainnet.aptoslabs.com/v1/graphql"))
+        client
+            .post("https://indexer.mainnet.aptoslabs.com/v1/graphql")
             .json(&serde_json::json!({ "query": graphql_query }))
             .send()
             .await
             .ok()?
             .json()
             .await
-            .ok()?;
-
-        result
+            .ok()?
     }
 
     async fn calculate_fee(
@@ -992,7 +997,7 @@ impl External {
                     Self::get_price_and_decimals(client, &token_clone).await
                 {
                     let fee_in_token = (amount_clone as f64) / divisor_clone;
-                    (price * fee_in_token as f64) / 10f64.powi(decimals as i32)
+                    (price * fee_in_token) / 10f64.powi(decimals as i32)
                 } else {
                     0.0
                 }
@@ -1011,9 +1016,8 @@ impl External {
     fn get_token_name_from_pair(input: &str) -> (String, String) {
         let mut num_open_bracket = 0;
         let mut comma_position = 0;
-        let mut i = 0;
 
-        for c in input.chars() {
+        for (i, c) in input.chars().enumerate() {
             match c {
                 '<' => num_open_bracket += 1,
                 '>' => num_open_bracket -= 1,
@@ -1023,7 +1027,6 @@ impl External {
                 }
                 _ => {}
             }
-            i += 1;
         }
 
         (
@@ -1118,7 +1121,7 @@ impl External {
                             let (_unused, pair_name) =
                                 indexed_type.split_at(SWAPEVENT_NAME_LENGTH + 1);
                             let pair_name = &pair_name[..(pair_name.len() - 1)];
-                            let (token_x, token_y) = Self::get_token_name_from_pair(&pair_name);
+                            let (token_x, token_y) = Self::get_token_name_from_pair(pair_name);
                             if *amount_x_in > 0 {
                                 local_coin_swaps.push((token_x, *amount_x_in));
                             };
@@ -1154,7 +1157,133 @@ impl External {
             println!("earliest_day: {:?}", earliest_day);
         }
 
-        Ok(Self::calculate_fee(&self, total_coin_swapped, 25, 10000).await)
+        Ok(Self::calculate_fee(self, total_coin_swapped, 25, 10000).await)
+    }
+    pub async fn fetch_coin_balances(&self, address: &str) -> Result<Vec<Coin>, reqwest::Error> {
+        let query = format!(
+            r#"
+        query {{
+          current_fungible_asset_balances(
+            where: {{owner_address: {{_eq: "{}"}}}}
+          ) {{
+            amount_v1
+            asset_type_v1
+            metadata {{
+              decimals
+              name
+              symbol
+            }}
+          }}
+        }}
+        "#,
+            address
+        );
+
+        let res: CoinBalanceResponse = self
+            .client
+            .post(format!("{FULLNODE_API}/graphql"))
+            .json(&serde_json::json!({ "query": query }))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        Ok(res
+            .data
+            .current_fungible_asset_balances
+            .into_iter()
+            .map(|balance| {
+                let amount =
+                    (balance.amount_v1 as f64) / 10f64.powi(balance.metadata.decimals as i32);
+                Coin {
+                    asset_type: balance.asset_type_v1,
+                    name: balance.metadata.name,
+                    symbol: balance.metadata.symbol,
+                    amount,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn fetch_transactions(
+        &self,
+        address: &str,
+    ) -> Result<Vec<Transaction>, reqwest::Error> {
+        let query = format!(
+            r#"
+        query {{
+          account_transactions(
+            where: {{account_address: {{_eq: "{}"}}}}
+            order_by: {{transaction_version: desc}}
+            limit: 25
+          ) {{
+            transaction_version
+            user_transaction {{
+              entry_function_id_str
+              timestamp
+              sender
+            }}
+            coin_activities {{
+              amount
+              coin_type
+              activity_type
+            }}
+          }}
+        }}
+        "#,
+            address
+        );
+
+        let res: TransactionResponse = self
+            .client
+            .post(format!("{FULLNODE_API}/graphql"))
+            .json(&serde_json::json!({ "query": query }))
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        Ok(res
+            .data
+            .account_transactions
+            .into_iter()
+            .map(|tx| {
+                let gas_fee = tx
+                    .coin_activities
+                    .iter()
+                    .find(|activity| activity.activity_type == "0x1::aptos_coin::GasFeeEvent")
+                    .map(|activity| activity.amount)
+                    .unwrap_or(0);
+
+                let amount = tx
+                    .coin_activities
+                    .iter()
+                    .find(|activity| {
+                        activity.coin_type == "0x1::aptos_coin::AptosCoin"
+                            && activity.activity_type == "0x1::coin::WithdrawEvent"
+                    })
+                    .map(|activity| activity.amount)
+                    .unwrap_or(0);
+
+                let receiver = tx
+                    .user_transaction
+                    .entry_function_id_str
+                    .split("::")
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+
+                Transaction {
+                    version: tx.transaction_version,
+                    timestamp: tx.user_transaction.timestamp,
+                    sender: tx.user_transaction.sender,
+                    receiver,
+                    function: tx.user_transaction.entry_function_id_str,
+                    amount,
+                    gas_amount: gas_fee,
+                }
+            })
+            .collect())
     }
 }
 

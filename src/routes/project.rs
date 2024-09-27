@@ -61,7 +61,7 @@ pub fn project_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 pub async fn create_project_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<NewProject>,
-) -> Result<Json<ProjectResponse>, Error> {
+) -> Result<Json<BasicProjectResponse>, Error> {
     // Check if the account associated with the project exists
     if let Some(ref address) = body.contract_address {
         if state.db.get_account_by_address(address).await?.is_none() {
@@ -91,9 +91,7 @@ pub async fn create_project_handler(
 
     let project = state.db.create_project(&new_project).await?;
 
-    Ok(Json(ProjectResponse::Basic(BasicProjectResponse::from(
-        project,
-    ))))
+    Ok(Json(BasicProjectResponse::from(project)))
 }
 
 /// Get project by ID handler function
@@ -115,41 +113,9 @@ pub async fn create_project_handler(
 pub async fn get_project_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i32>,
-) -> Result<Json<ProjectResponse>, Error> {
+) -> Result<Json<BasicProjectResponse>, Error> {
     if let Some(project) = state.db.get_project_by_id(id).await? {
-        match project.category.as_str() {
-            "DEX" => {
-                if let (Some(contract_address), Some(entry_function_id_str)) = (
-                    &project.contract_address,
-                    project.get_string("entry_function_id_str"),
-                ) {
-                    let transactions = state
-                        .ext
-                        .get_swap_transactions(contract_address, &entry_function_id_str)
-                        .await?;
-
-                    // Create DexProjectResponse
-                    let dex_response = DexProjectResponse::from_project(project, transactions)
-                        .ok_or_else(|| {
-                            Error::new(
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Failed to create DexProjectResponse",
-                            )
-                        })?;
-
-                    Ok(Json(ProjectResponse::Dex(dex_response))) // Return DEX response
-                } else {
-                    Err(Error::new(
-                        StatusCode::BAD_REQUEST,
-                        "Missing contract_address or entry_function_id_str in project attributes",
-                    ))
-                }
-            }
-            _ => Err(Error::new(
-                StatusCode::BAD_REQUEST,
-                "Unknown project category",
-            )),
-        }
+        Ok(Json(BasicProjectResponse::from(project)))
     } else {
         Err(Error::new(StatusCode::NOT_FOUND, "Project not found"))
     }
@@ -235,7 +201,7 @@ pub async fn update_project_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i32>,
     Json(body): Json<UpdateProject>,
-) -> Result<Json<ProjectResponse>, Error> {
+) -> Result<Json<BasicProjectResponse>, Error> {
     // Fetch the existing project
     let mut project = if let Some(project) = state.db.get_project_by_id(id).await? {
         project
@@ -253,9 +219,7 @@ pub async fn update_project_handler(
     if let Some(category) = body.category {
         project.category = category;
     }
-    if let Some(contract_address) = body.contract_address {
-        project.contract_address = Some(contract_address);
-    }
+    project.contract_address = body.contract_address;
 
     // Update attributes
     if let Some(attributes) = body.attributes {
@@ -269,7 +233,5 @@ pub async fn update_project_handler(
     }
 
     let updated_project = state.db.update_project(&project).await?;
-    Ok(Json(ProjectResponse::Basic(BasicProjectResponse::from(
-        updated_project,
-    ))))
+    Ok(Json(BasicProjectResponse::from(updated_project)))
 }

@@ -5,6 +5,7 @@ mod middlewares;
 mod project;
 mod swagger;
 mod user;
+mod utils;
 use crate::database;
 use crate::external::External;
 use health::health_checker_handler;
@@ -49,6 +50,7 @@ pub async fn make_app() -> Result<Router, Box<dyn Error>> {
         .nest("/api/entity", entity::entity_routes(state.clone()))
         .nest("/api/account", account::account_routes(state.clone()))
         .nest("/api/project", project::project_routes(state.clone()))
+        .nest("/api/utils", utils::utils_routes(state.clone()))
         .merge(swagger::build_documentation())
         .with_state(state)
         .layer(TraceLayer::new_for_http());

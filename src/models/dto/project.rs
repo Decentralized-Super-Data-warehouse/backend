@@ -29,6 +29,7 @@ pub struct NewProject {
     pub token: String,
     pub category: String,
     pub contract_address: Option<String>,
+    pub avatar_url: Option<String>,
     #[schema(additional_properties)]
     pub attributes: HashMap<String, serde_json::Value>,
 }
@@ -39,6 +40,7 @@ pub struct UpdateProject {
     pub token: Option<String>,
     pub category: Option<String>,
     pub contract_address: Option<String>,
+    pub avatar_url: Option<String>,
     #[schema(additional_properties)]
     pub attributes: Option<HashMap<String, serde_json::Value>>,
 }
@@ -50,6 +52,7 @@ pub struct BasicProjectResponse {
     pub token: String,
     pub category: String,
     pub contract_address: Option<String>,
+    pub avatar_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -62,6 +65,7 @@ impl From<Project> for BasicProjectResponse {
             token: project.token,
             category: project.category,
             contract_address: project.contract_address,
+            avatar_url: project.avatar_url,
             created_at: project.created_at.to_string(),
             updated_at: project.updated_at.to_string(),
         }

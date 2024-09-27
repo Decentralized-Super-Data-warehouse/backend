@@ -35,6 +35,7 @@ CREATE TABLE entity (
 CREATE TABLE account (
     id serial primary key not null,
     address varchar(128) unique not null,
+    name varchar(128),
     entity_id integer references entity(id) on delete cascade,
     created_at timestamp with time zone default current_timestamp not null,
     updated_at timestamp with time zone default current_timestamp not null
@@ -48,6 +49,7 @@ CREATE TABLE project (
     token VARCHAR(64) NOT NULL,
     category VARCHAR(128) NOT NULL,
     contract_address VARCHAR(128) REFERENCES account(address) ON DELETE CASCADE,
+    avatar_url VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 );

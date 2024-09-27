@@ -126,7 +126,7 @@ impl PostgreDatabase {
             r#"
             INSERT INTO account (address, entity_id)
             VALUES ($1, $2)
-            RETURNING id, address, entity_id, created_at, updated_at
+            RETURNING id, name, address, entity_id, created_at, updated_at
             "#,
             new_account.address,
             new_account.entity_id
@@ -137,6 +137,7 @@ impl PostgreDatabase {
         match result {
             Ok(row) => Ok(Account {
                 id: row.id,
+                name: row.name,
                 address: row.address,
                 entity_id: row.entity_id,
                 created_at: row.created_at,
@@ -150,7 +151,7 @@ impl PostgreDatabase {
         let row = sqlx::query_as!(
             Account,
             r#"
-            SELECT id, address, entity_id, created_at, updated_at
+            SELECT *
             FROM account
             WHERE id = $1
             "#,
@@ -164,7 +165,7 @@ impl PostgreDatabase {
         let row = sqlx::query_as!(
             Account,
             r#"
-            SELECT id, address, entity_id, created_at, updated_at
+            SELECT *
             FROM account
             WHERE address = $1
             "#,
@@ -177,7 +178,8 @@ impl PostgreDatabase {
     pub async fn update_account(&self, account: &Account) -> Result<Account, sqlx::Error> {
         let query = sqlx::query_as!(
             Account,
-            "UPDATE account SET entity_id = $1, updated_at = now() WHERE id = $2 RETURNING *",
+            "UPDATE account SET name = $1, entity_id = $2, updated_at = now() WHERE id = $3 RETURNING *",
+            account.name,
             account.entity_id,
             account.id
         )
@@ -208,6 +210,7 @@ impl PostgreDatabase {
                 token: p.token,
                 category: p.category,
                 contract_address: p.contract_address,
+                avatar_url: p.avatar_url,
                 created_at: p.created_at,
                 updated_at: p.updated_at,
                 attributes,
@@ -238,6 +241,7 @@ impl PostgreDatabase {
                 token: p.token,
                 category: p.category,
                 contract_address: p.contract_address,
+                avatar_url: p.avatar_url,
                 created_at: p.created_at,
                 updated_at: p.updated_at,
                 attributes,
@@ -271,6 +275,7 @@ impl PostgreDatabase {
                 token: p.token,
                 category: p.category,
                 contract_address: p.contract_address,
+                avatar_url: p.avatar_url,
                 created_at: p.created_at,
                 updated_at: p.updated_at,
                 attributes,
@@ -319,6 +324,7 @@ impl PostgreDatabase {
             token: new_project.token,
             category: new_project.category,
             contract_address: new_project.contract_address,
+            avatar_url: new_project.avatar_url,
             created_at: new_project.created_at,
             updated_at: new_project.updated_at,
             attributes: project.attributes.clone(),
@@ -339,7 +345,7 @@ impl PostgreDatabase {
         "#,
         project.name, project.token, project.category, project.contract_address, project.id
     )
-    .fetch_one(&mut *transaction) // Note: `&mut *transaction` is used here
+    .fetch_one(&mut *transaction)
     .await?;
 
         // Delete existing attributes
@@ -350,7 +356,7 @@ impl PostgreDatabase {
         "#,
             project.id
         )
-        .execute(&mut *transaction) // Note: `&mut *transaction` is used here
+        .execute(&mut *transaction)
         .await?;
 
         // Insert new attributes
@@ -365,7 +371,7 @@ impl PostgreDatabase {
                 attr.value.to_string(),
                 get_value_type(&attr.value)
             )
-            .execute(&mut *transaction) // Note: `&mut *transaction` is used here
+            .execute(&mut *transaction)
             .await?;
         }
 
@@ -377,6 +383,7 @@ impl PostgreDatabase {
             token: updated_project.token,
             category: updated_project.category,
             contract_address: updated_project.contract_address,
+            avatar_url: updated_project.avatar_url,
             created_at: updated_project.created_at,
             updated_at: updated_project.updated_at,
             attributes: project.attributes.clone(),

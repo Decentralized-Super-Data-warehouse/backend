@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct Account {
     pub id: i32,
     pub address: String,
+    pub name: Option<String>,
     pub entity_id: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
