@@ -1,21 +1,39 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State, http::StatusCode, middleware, response::IntoResponse, routing::{get, post, put}, Json, Router
+    extract::State,
+    http::StatusCode,
+    middleware,
+    response::IntoResponse,
+    routing::{get, post, put},
+    Json, Router,
 };
+use tracing::{debug, error, info};
 use utoipa::OpenApi;
 
-use crate::{models::{dto::{AccountResponse, NewAccount, UpdateAccount}, Account, Error}, AppState};
+use crate::{
+    models::{
+        dto::{AccountDetailsResponse, AccountResponse, NewAccount, UpdateAccount},
+        Account, Error,
+    },
+    AppState,
+};
 
 use super::middlewares::auth_guard;
 
 /// Defines the OpenAPI spec for account endpoints
 #[derive(OpenApi)]
-#[openapi(paths(create_account_handler, get_account_handler, update_account_handler))]
+#[openapi(paths(
+    create_account_handler,
+    get_account_handler,
+    get_account_by_address_handler,
+    update_account_handler
+))]
 pub struct AccountsApi;
 
 /// Used to group entity endpoints together in the OpenAPI documentation
 pub const ACCOUNT_API_GROUP: &str = "ACCOUNT";
+const APTOS_COIN_TYPE: &str = "0x1::aptos_coin::AptosCoin";
 
 /// Builds a router for account routes
 pub fn account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -23,6 +41,7 @@ pub fn account_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/", post(create_account_handler))
         .route("/:id", get(get_account_handler))
         .route("/:id", put(update_account_handler))
+        .route("/address/:address", get(get_account_by_address_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_guard))
 }
 
@@ -57,7 +76,7 @@ pub async fn create_account_handler(
     }
 
     // Check if the entity associated with the account exists
-    if let Some(entity_id) = body.entity_id { 
+    if let Some(entity_id) = body.entity_id {
         if state.db.get_entity_by_id(entity_id).await?.is_none() {
             return Err(Error::new(StatusCode::BAD_REQUEST, "Entity does not exist"));
         }
@@ -74,6 +93,7 @@ pub async fn create_account_handler(
 
     Ok(Json(AccountResponse {
         id: account.id,
+        name: account.name,
         address: account.address,
         entity_id: account.entity_id,
         created_at: account.created_at.to_string(),
@@ -114,6 +134,87 @@ pub async fn get_account_handler(
     }
 }
 
+/// Get account by address handler function
+#[utoipa::path(
+    get,
+    path = "/api/account/address/{address}",
+    tag = ACCOUNT_API_GROUP,
+    security(
+        ("bearerAuth" = [])
+    ),
+    responses(
+        (status = 200, description = "Account found", body = AccountDetailsResponse),
+        (status = 404, description = "Account not found"),
+    ),
+    params(
+        ("address" = String, Path, description = "Account Address")
+    )
+)]
+pub async fn get_account_by_address_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(address): axum::extract::Path<String>,
+) -> Result<Json<AccountDetailsResponse>, StatusCode> {
+    // Query the account information
+    let name = match state.db.get_account_by_address(&address).await {
+        Ok(Some(account)) => account.name,
+        Ok(None) => None,
+        Err(_) => return Err(StatusCode::OK),
+    };
+
+    // Fetch coin balances and transactions in parallel
+    // Fetch coin balances and transactions in parallel
+    info!("Fetching coin balances and transactions...");
+    let coin_balances_result = state.ext.fetch_coin_balances(&address).await;
+    let transactions_result = state.ext.fetch_transactions(&address).await;
+
+    let coin_balances = match coin_balances_result {
+        Ok(balances) => {
+            info!("Coin balances fetched successfully");
+            balances
+        }
+        Err(e) => {
+            error!("Error fetching coin balances: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let transactions = match transactions_result {
+        Ok(txns) => {
+            info!("Transactions fetched successfully");
+            txns
+        }
+        Err(e) => {
+            error!("Error fetching transactions: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Determine category based on Aptos coin balance
+    let category = if let Some(aptos_balance) = coin_balances
+        .iter()
+        .find(|coin| coin.asset_type == APTOS_COIN_TYPE)
+    {
+        if aptos_balance.amount > 1_000_000.0 {
+            // 1,000,000 APT (considering 8 decimal places)
+            "Whale"
+        } else {
+            "Anonymous"
+        }
+    } else {
+        "Anonymous"
+    };
+    info!("Category determined: {}", category);
+
+    let response = AccountDetailsResponse {
+        name,
+        category: category.to_string(),
+        transactions,
+        coins: coin_balances,
+    };
+
+    Ok(Json(response))
+}
+
 /// Update account handler function
 #[utoipa::path(
     put,
@@ -138,11 +239,10 @@ pub async fn update_account_handler(
     Json(body): Json<UpdateAccount>,
 ) -> Result<impl IntoResponse, Error> {
     // Fetch the account by ID
-    let account = state
-        .db
-        .get_account_by_id(id)
-        .await
-        .map_err(|_| Error::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch account"))?;
+    let account =
+        state.db.get_account_by_id(id).await.map_err(|_| {
+            Error::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch account")
+        })?;
 
     if let Some(mut account) = account {
         // Check if the entity_id is provided
@@ -158,11 +258,14 @@ pub async fn update_account_handler(
             account.entity_id = None;
         }
 
+        account.name = body.name;
+
         // Persist the updated account to the database
         let updated_account = state.db.update_account(&account).await?;
 
         Ok(Json(AccountResponse {
             id: updated_account.id,
+            name: updated_account.name,
             address: updated_account.address,
             entity_id: updated_account.entity_id,
             created_at: updated_account.created_at.to_string(),

@@ -3,16 +3,22 @@ pub mod user;
 pub mod entity;
 pub mod account;
 pub mod project;
+pub mod dex_data;
+pub mod utils;
 pub use message::Message;
 pub use user::*;
 pub use entity::*;
 pub use account::*;
 pub use project::*;
+pub use dex_data::*;
+pub use utils::*;
 
 use utoipa::{
     openapi::security::{Http, HttpAuthScheme, SecurityScheme},
     Modify, OpenApi,
 };
+
+use crate::models::SwapTransaction;
 #[derive(OpenApi)]
 #[openapi(
     components(
@@ -29,6 +35,11 @@ use utoipa::{
             NewProject,
             UpdateProject,
             ProjectResponse,
+            BasicProjectResponse,
+            DexProjectResponse,
+            SwapTransaction,
+            AccountDetailsResponse,
+            CoinPriceResponse
         ),
     ),     
     modifiers(&SecurityAddon)

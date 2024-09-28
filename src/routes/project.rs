@@ -4,7 +4,6 @@ use axum::{
     extract::State,
     http::StatusCode,
     middleware,
-    response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
 };
@@ -12,8 +11,11 @@ use utoipa::OpenApi;
 
 use crate::{
     models::{
-        dto::{NewProject, ProjectResponse, UpdateProject},
-        Error, Project,
+        dto::{
+            BasicProjectResponse, DexProjectResponse, NewProject, ProjectResponse, UpdateProject,
+        },
+        project::{Project, ProjectAttribute},
+        Error,
     },
     AppState,
 };
@@ -22,7 +24,12 @@ use super::middlewares::auth_guard;
 
 /// Defines the OpenAPI spec for project endpoints
 #[derive(OpenApi)]
-#[openapi(paths(create_project_handler, get_project_handler, update_project_handler))]
+#[openapi(paths(
+    create_project_handler,
+    get_project_handler,
+    get_project_by_name_handler,
+    update_project_handler
+))]
 pub struct ProjectsApi;
 
 /// Used to group project endpoints together in the OpenAPI documentation
@@ -33,6 +40,7 @@ pub fn project_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/", post(create_project_handler))
         .route("/:id", get(get_project_handler))
+        .route("/name/:name", get(get_project_by_name_handler))
         .route("/:id", put(update_project_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_guard))
 }
@@ -53,7 +61,7 @@ pub fn project_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 pub async fn create_project_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<NewProject>,
-) -> Result<Json<ProjectResponse>, Error> {
+) -> Result<Json<BasicProjectResponse>, Error> {
     // Check if the account associated with the project exists
     if let Some(ref address) = body.contract_address {
         if state.db.get_account_by_address(address).await?.is_none() {
@@ -66,30 +74,27 @@ pub async fn create_project_handler(
 
     // Create the new project
     let new_project = Project {
+        name: body.name.clone(),
         token: body.token.clone(),
         category: body.category.clone(),
         contract_address: body.contract_address.clone(),
+        attributes: body
+            .attributes
+            .iter()
+            .map(|(key, value)| ProjectAttribute {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect(),
         ..Default::default()
     };
 
     let project = state.db.create_project(&new_project).await?;
 
-    Ok(Json(ProjectResponse {
-        id: project.id,
-        token: project.token,
-        category: project.category,
-        contract_address: project.contract_address,
-        num_chains: project.num_chains,
-        core_developers: project.core_developers,
-        code_commits: project.code_commits,
-        total_value_locked: project.total_value_locked,
-        token_max_supply: project.token_max_supply,
-        created_at: project.created_at.to_string(),
-        updated_at: project.updated_at.to_string(),
-    }))
+    Ok(Json(BasicProjectResponse::from(project)))
 }
 
-/// Get project handler function
+/// Get project by ID handler function
 #[utoipa::path(
     get,
     path = "/api/project/{id}",
@@ -97,28 +102,81 @@ pub async fn create_project_handler(
     security(
         ("bearerAuth" = [])
     ),
-    responses(
-        (status = 200, description = "Project found", body = ProjectResponse),
-        (status = 404, description = "Project not found"),
-    ),
     params(
-        ("id" = i32, Path, description = "Project ID")
+        ("id" = i32, Path, description = "The ID of the project to fetch")
+    ),
+    responses(
+        (status = 200, description = "Project successfully fetched", body = ProjectResponse),
+        (status = 404, description = "Project not found"),
     )
 )]
 pub async fn get_project_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i32>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let project = state
-        .db
-        .get_project_by_id(id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if let Some(project) = project {
-        Ok((StatusCode::OK, Json(project)))
+) -> Result<Json<BasicProjectResponse>, Error> {
+    if let Some(project) = state.db.get_project_by_id(id).await? {
+        Ok(Json(BasicProjectResponse::from(project)))
     } else {
-        Err(StatusCode::NOT_FOUND)
+        Err(Error::new(StatusCode::NOT_FOUND, "Project not found"))
+    }
+}
+
+/// Get project by name handler function
+#[utoipa::path(
+    get,
+    path = "/api/project/name/{name}",
+    security(
+        ("bearerAuth" = [])
+    ),
+    tag = PROJECT_API_GROUP,
+    params(
+        ("name" = String, Path, description = "The name of the project to fetch")
+    ),
+    responses(
+        (status = 200, description = "Project successfully fetched", body = ProjectResponse),
+        (status = 404, description = "Project not found"),
+    )
+)]
+pub async fn get_project_by_name_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<Json<ProjectResponse>, Error> {
+    if let Some(project) = state.db.get_project_by_name(&name).await? {
+        match project.category.as_str() {
+            "DEX" => {
+                if let (Some(contract_address), Some(entry_function_id_str)) = (
+                    &project.contract_address,
+                    project.get_string("entry_function_id_str"),
+                ) {
+                    let transactions = state
+                        .ext
+                        .get_swap_transactions(contract_address, &entry_function_id_str)
+                        .await?;
+
+                    // Create DexProjectResponse
+                    let dex_response = DexProjectResponse::from_project(project, transactions)
+                        .ok_or_else(|| {
+                            Error::new(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Failed to create DexProjectResponse",
+                            )
+                        })?;
+
+                    Ok(Json(ProjectResponse::Dex(dex_response)))
+                } else {
+                    Err(Error::new(
+                        StatusCode::BAD_REQUEST,
+                        "Missing contract_address or entry_function_id_str in project attributes",
+                    ))
+                }
+            }
+            _ => Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "Unknown project category",
+            )),
+        }
+    } else {
+        Err(Error::new(StatusCode::NOT_FOUND, "Project not found"))
     }
 }
 
@@ -127,6 +185,9 @@ pub async fn get_project_handler(
     put,
     path = "/api/project/{id}",
     tag = PROJECT_API_GROUP,
+    params(
+        ("id" = i32, Path, description = "The ID of the project to update")
+    ),
     request_body = UpdateProject,
     security(
         ("bearerAuth" = [])
@@ -134,83 +195,43 @@ pub async fn get_project_handler(
     responses(
         (status = 200, description = "Project successfully updated", body = ProjectResponse),
         (status = 404, description = "Project not found"),
-        (status = 400, description = "Invalid account ID"),
-    ),
-    params(
-        ("id" = i32, Path, description = "Project ID")
     )
 )]
 pub async fn update_project_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<i32>,
     Json(body): Json<UpdateProject>,
-) -> Result<impl IntoResponse, Error> {
-    // Fetch the project by ID
-    let project =
-        state.db.get_project_by_id(id).await.map_err(|_| {
-            Error::new(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch project")
-        })?;
-
-    if let Some(mut project) = project {
-        // Check if the contract_address is provided and exists
-        if let Some(address) = body.contract_address {
-            if state.db.get_account_by_address(&address).await?.is_none() {
-                return Err(Error::new(
-                    StatusCode::BAD_REQUEST,
-                    "Account does not exist",
-                ));
-            }
-            project.contract_address = Some(address);
-        } else {
-            project.contract_address = None;
-        }
-
-        // Update the fields if they are provided
-        if let Some(token) = body.token {
-            project.token = token;
-        }
-
-        if let Some(category) = body.category {
-            project.category = category;
-        }
-
-        if let Some(num_chains) = body.num_chains {
-            project.num_chains = Some(num_chains);
-        }
-
-        if let Some(core_developers) = body.core_developers {
-            project.core_developers = Some(core_developers);
-        }
-
-        if let Some(code_commits) = body.code_commits {
-            project.code_commits = Some(code_commits);
-        }
-
-        if let Some(total_value_locked) = body.total_value_locked {
-            project.total_value_locked = Some(total_value_locked);
-        }
-
-        if let Some(token_max_supply) = body.token_max_supply {
-            project.token_max_supply = Some(token_max_supply);
-        }
-
-        // Persist the updated project to the database
-        let updated_project = state.db.update_project(&project).await?;
-
-        Ok(Json(ProjectResponse {
-            id: updated_project.id,
-            token: updated_project.token,
-            category: updated_project.category,
-            contract_address: updated_project.contract_address,
-            num_chains: updated_project.num_chains,
-            core_developers: updated_project.core_developers,
-            code_commits: updated_project.code_commits,
-            total_value_locked: updated_project.total_value_locked,
-            token_max_supply: updated_project.token_max_supply,
-            created_at: updated_project.created_at.to_string(),
-            updated_at: updated_project.updated_at.to_string(),
-        }))
+) -> Result<Json<BasicProjectResponse>, Error> {
+    // Fetch the existing project
+    let mut project = if let Some(project) = state.db.get_project_by_id(id).await? {
+        project
     } else {
-        Err(Error::new(StatusCode::NOT_FOUND, "Project not found"))
+        return Err(Error::new(StatusCode::NOT_FOUND, "Project not found"));
+    };
+
+    // Update fields
+    if let Some(name) = body.name {
+        project.name = name;
     }
+    if let Some(token) = body.token {
+        project.token = token;
+    }
+    if let Some(category) = body.category {
+        project.category = category;
+    }
+    project.contract_address = body.contract_address;
+
+    // Update attributes
+    if let Some(attributes) = body.attributes {
+        project.attributes = attributes
+            .iter()
+            .map(|(key, value)| ProjectAttribute {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect();
+    }
+
+    let updated_project = state.db.update_project(&project).await?;
+    Ok(Json(BasicProjectResponse::from(updated_project)))
 }

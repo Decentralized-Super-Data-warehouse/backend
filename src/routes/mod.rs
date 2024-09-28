@@ -5,7 +5,9 @@ mod middlewares;
 mod project;
 mod swagger;
 mod user;
+mod utils;
 use crate::database;
+use crate::external::External;
 use health::health_checker_handler;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -29,6 +31,7 @@ pub async fn make_app() -> Result<Router, Box<dyn Error>> {
     info!("Connecting to PostgreSQL...");
     let sqlx_db_connection = database::connect_sqlx(&config.db_url).await;
     info!("Connected to PostgreSQL!");
+
     //let cors = HeaderValue::from_str(&config.cors_url)?;
     // TODO: Consider readding CORS here
     //let cors = CorsLayer::new()
@@ -38,7 +41,8 @@ pub async fn make_app() -> Result<Router, Box<dyn Error>> {
     //    .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE]);
 
     let db = database::PostgreDatabase::new(sqlx_db_connection);
-    let state = Arc::new(AppState { db, config });
+    let ext = External::new();
+    let state = Arc::new(AppState { db, ext, config });
     let ret = Router::new()
         .route("/api", get(health_checker_handler))
         .route("/api/health", get(health_checker_handler))
@@ -46,6 +50,7 @@ pub async fn make_app() -> Result<Router, Box<dyn Error>> {
         .nest("/api/entity", entity::entity_routes(state.clone()))
         .nest("/api/account", account::account_routes(state.clone()))
         .nest("/api/project", project::project_routes(state.clone()))
+        .nest("/api/utils", utils::utils_routes(state.clone()))
         .merge(swagger::build_documentation())
         .with_state(state)
         .layer(TraceLayer::new_for_http());

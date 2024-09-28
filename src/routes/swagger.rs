@@ -20,6 +20,7 @@ pub fn build_documentation() -> SwaggerUi {
     api_docs.merge(super::entity::EntityApi::openapi());
     api_docs.merge(super::account::AccountsApi::openapi());
     api_docs.merge(super::project::ProjectsApi::openapi());
+    api_docs.merge(super::utils::UtilsApi::openapi());
 
     SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api_docs)
 }

@@ -77,6 +77,17 @@ impl From<reqwest::Error> for TokenHolderError {
     }
 }
 
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        // You might want to use a specific status code based on the error type
+        let status_code = match error.status() {
+            Some(status) => status,
+            None => StatusCode::INTERNAL_SERVER_ERROR, // Default status code
+        };
+        Self::new(status_code, &error.to_string())
+    }
+}
+
 impl From<serde_json::Error> for TokenHolderError {
     fn from(error: serde_json::Error) -> Self {
         TokenHolderError::JsonError(error)
