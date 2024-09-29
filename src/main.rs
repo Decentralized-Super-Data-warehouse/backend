@@ -1,6 +1,7 @@
 mod app_state;
 mod config;
 mod database;
+mod scheduler;
 pub mod external;
 mod models;
 mod routes;

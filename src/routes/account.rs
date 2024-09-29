@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use utoipa::OpenApi;
 
 use crate::{

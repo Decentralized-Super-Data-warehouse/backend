@@ -6,8 +6,9 @@ mod project;
 mod swagger;
 mod user;
 mod utils;
-use crate::database;
+use crate::database::{self, PostgreDatabase};
 use crate::external::External;
+use crate::scheduler::Scheduler;
 use health::health_checker_handler;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -40,8 +41,9 @@ pub async fn make_app() -> Result<Router, Box<dyn Error>> {
     //    .allow_credentials(true)
     //    .allow_headers([AUTHORIZATION, ACCEPT, CONTENT_TYPE]);
 
-    let db = database::PostgreDatabase::new(sqlx_db_connection);
+    let db = PostgreDatabase::new(sqlx_db_connection);
     let ext = External::new();
+    let scheduler = Scheduler::new(db.clone(), ext.clone());
     let state = Arc::new(AppState { db, ext, config });
     let ret = Router::new()
         .route("/api", get(health_checker_handler))
@@ -56,5 +58,8 @@ pub async fn make_app() -> Result<Router, Box<dyn Error>> {
         .layer(TraceLayer::new_for_http());
     //.layer(cors);
 
+    tokio::spawn(async move {
+        scheduler.spawn_tasks().await;
+    });
     Ok(ret)
 }

@@ -12,6 +12,7 @@ pub async fn connect_sqlx(db_url: &str) -> sqlx::PgPool {
         .expect("Could not connect to the database")
 }
 
+#[derive(Clone)]
 pub struct PostgreDatabase {
     sqlx_db: PgPool,
 }
@@ -296,7 +297,10 @@ impl PostgreDatabase {
             VALUES ($1, $2, $3, $4)
             RETURNING *
             "#,
-            project.name, project.token, project.category, project.contract_address,
+            project.name,
+            project.token,
+            project.category,
+            project.contract_address,
         )
         .fetch_one(&mut *transaction)
         .await?;
@@ -414,6 +418,29 @@ impl PostgreDatabase {
                 value: parse_value(attr.value.as_deref().unwrap_or(""), &attr.value_type),
             })
             .collect())
+    }
+    pub async fn update_project_attribute(
+        &self,
+        project_id: i32,
+        key: &str,
+        value: Value,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            INSERT INTO project_attribute (project_id, key, value, value_type)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (project_id, key) 
+            DO UPDATE SET value = $3, value_type = $4
+            "#,
+            project_id,
+            key,
+            value.to_string(),
+            get_value_type(&value)
+        )
+        .execute(&self.sqlx_db)
+        .await?;
+
+        Ok(())
     }
 }
 

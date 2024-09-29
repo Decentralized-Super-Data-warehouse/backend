@@ -1,10 +1,11 @@
+use anyhow::{anyhow, Error};
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use futures::future::join_all;
 use reqwest::Client;
 use scraper::{Html, Selector};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::{error::Error, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::models::dto::{Coin, CoinBalanceResponse, Transaction, TransactionResponse};
@@ -21,6 +22,7 @@ pub const USDC: &str =
     "0xf22bede237a07e121b56d91a491eb7bcdfd1f5907926a9e58338f964a01b17fa::asset::USDC";
 const DECIMALS_USD: u8 = 6;
 
+#[derive(Clone)]
 pub struct External {
     pub client: Client,
 }
@@ -57,15 +59,16 @@ impl External {
                     if obj_type.contains("swap::TokenPairReserve") {
                         if let Some(data) = obj.get("data").and_then(Value::as_object) {
                             if let (Some(reserve_x), Some(reserve_y)) =
-                            (data.get("reserve_x"), data.get("reserve_y"))
+                                (data.get("reserve_x"), data.get("reserve_y"))
                             {
                                 if let (Some(reserve_x_str), Some(reserve_y_str)) =
-                                (reserve_x.as_str(), reserve_y.as_str())
+                                    (reserve_x.as_str(), reserve_y.as_str())
                                 {
                                     let reserve_x_value = reserve_x_str.parse::<u64>().unwrap_or(0);
                                     let reserve_y_value = reserve_y_str.parse::<u64>().unwrap_or(0);
-                                    
-                                    let (token_x, token_y) = Self::get_token_names_from_type(obj_type);
+
+                                    let (token_x, token_y) =
+                                        Self::get_token_names_from_type(obj_type);
                                     *reserves.entry(token_x.to_string()).or_insert(0) +=
                                         reserve_x_value;
                                     *reserves.entry(token_y.to_string()).or_insert(0) +=
@@ -214,7 +217,7 @@ impl External {
     pub async fn get_data_from_tokenterminal(
         &self,
         project: &str,
-    ) -> Result<TokenTerminalData, Box<dyn Error>> {
+    ) -> Result<TokenTerminalData, Error> {
         // Initialize the browser with headless mode
         let browser = Browser::new(LaunchOptionsBuilder::default().headless(true).build()?)?;
 
@@ -246,11 +249,9 @@ impl External {
         Ok(data)
     }
 
-    fn scrape_ath_atl(
-        &self,
-        document: &Html,
-    ) -> Result<(String, String, String, String), Box<dyn Error>> {
-        let span_selector = Selector::parse("span")?;
+    fn scrape_ath_atl(&self, document: &Html) -> Result<(String, String, String, String), Error> {
+        let span_selector =
+            Selector::parse("span").map_err(|e| anyhow!("Failed to parse selector: {}", e))?;
         let mut ath = String::new();
         let mut ath_last = String::new();
         let mut atl = String::new();
@@ -275,9 +276,11 @@ impl External {
         Ok((ath, ath_last, atl, atl_last))
     }
 
-    fn scrape_financials(&self, document: &Html) -> Result<TokenTerminalData, Box<dyn Error>> {
-        let li_selector = Selector::parse("li")?;
-        let div_selector = Selector::parse("div")?;
+    fn scrape_financials(&self, document: &Html) -> Result<TokenTerminalData, Error> {
+        let li_selector =
+            Selector::parse("li").map_err(|e| anyhow!("Failed to parse li selector: {}", e))?;
+        let div_selector =
+            Selector::parse("div").map_err(|e| anyhow!("Failed to parse div selector: {}", e))?;
         let mut data = TokenTerminalData::default();
 
         for li in document.select(&li_selector) {
@@ -412,11 +415,7 @@ impl External {
 
         Ok(transactions)
     }
-    pub async fn get_token_supply(
-        &self,
-        address: &str,
-        token: &str,
-    ) -> Result<f64, Box<dyn Error>> {
+    pub async fn get_token_supply(&self, address: &str, token: &str) -> Result<f64, Error> {
         let url =
             format!("{FULLNODE_API}/accounts/{address}/resource/0x1::coin::CoinInfo<{token}>");
 
@@ -434,7 +433,7 @@ impl External {
             }
         }
 
-        Err("Failed to get token supply".into())
+        Err(anyhow!("Failed to get token supply"))
     }
     pub async fn calculate_market_cap(
         &self,
@@ -442,13 +441,13 @@ impl External {
         address: &str,
         token: &str,
         token_address: &str,
-    ) -> Result<MarketCap, Box<dyn Error>> {
+    ) -> Result<MarketCap, Error> {
         let client = Client::new();
 
         // Get the token price
         let price = match Self::get_price_and_decimals(client.clone(), token).await {
             Some((price, _)) => price,
-            None => return Err("Failed to get price and decimals".into()),
+            None => return Err(anyhow!("Failed to get price and decimals")),
         };
 
         // Get the max supply from the database
@@ -564,7 +563,7 @@ impl External {
         &self,
         address: &str,
         entry_function_id: &str,
-    ) -> Result<f64, Box<dyn Error>> {
+    ) -> Result<f64, Error> {
         let client = Arc::new(self.client.clone());
         let coin_volumes: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
         let mut offset = 0;
@@ -664,7 +663,7 @@ impl External {
                         }
                     }
 
-                    Ok::<bool, Box<dyn Error + Send + Sync>>(local_found_old_activity)
+                    Ok::<bool, Error>(local_found_old_activity)
                 });
 
                 tasks.push(task);
@@ -681,7 +680,7 @@ impl External {
                         }
                     }
                     Ok(Err(e)) => return Err(e),
-                    Err(e) => return Err(Box::new(e)),
+                    Err(e) => return Err(Error::from(e)),
                 }
             }
         }
@@ -727,7 +726,7 @@ impl External {
         Ok(total_volume_usd)
     }
 
-    pub async fn get_daily_active_users(&self, address: &str) -> Result<usize, Box<dyn Error>> {
+    pub async fn get_daily_active_users(&self, address: &str) -> Result<usize, Error> {
         let client = Arc::new(self.client.clone());
         let mut offset = 0;
         let mut active_users = HashSet::new();
@@ -800,10 +799,7 @@ impl External {
                         }
                     }
 
-                    Ok::<(HashSet<String>, bool), Box<dyn Error + Send + Sync>>((
-                        daily_users,
-                        batch_found_old_transaction,
-                    ))
+                    Ok::<(HashSet<String>, bool), Error>((daily_users, batch_found_old_transaction))
                 });
 
                 tasks.push(task);
@@ -834,7 +830,7 @@ impl External {
         Ok(active_users.len())
     }
 
-    pub async fn get_weekly_active_users(&self, address: &str) -> Result<usize, Box<dyn Error>> {
+    pub async fn get_weekly_active_users(&self, address: &str) -> Result<usize, Error> {
         let client = Arc::new(self.client.clone());
         let mut offset = 0;
         let mut active_users = HashSet::new();
@@ -908,7 +904,7 @@ impl External {
                         }
                     }
 
-                    Ok::<(HashSet<String>, bool), Box<dyn Error + Send + Sync>>((
+                    Ok::<(HashSet<String>, bool), Error>((
                         weekly_users,
                         batch_found_old_transaction,
                     ))
@@ -1132,8 +1128,7 @@ impl External {
         // fee is (numerator) / (denomerator)
         // value after fee is (denomerator - numerator) / (denomerator)
         // value after fee -> fee is (value after fee / (denomerator - numerator)) * (numerator) = (value after fee) / ((denomerator - numerator) / numerator)
-        let divisor =
-            ((denomerator - numerator) as f64) / (numerator as f64);
+        let divisor = ((denomerator - numerator) as f64) / (numerator as f64);
 
         for (token, amount) in &total_coin_swapped {
             let token_clone = token.to_string();
@@ -1195,8 +1190,7 @@ impl External {
             .current_fungible_asset_balances
             .into_iter()
             .map(|balance| {
-                let amount =
-                    (balance.amount_v1 as f64) / 10f64.powi(balance.metadata.decimals as i32);
+                let amount = (balance.amount_v1 as f64) / 10f64.powi(balance.metadata.decimals);
                 Coin {
                     asset_type: balance.asset_type_v1,
                     name: balance.metadata.name,
