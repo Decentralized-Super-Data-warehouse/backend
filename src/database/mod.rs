@@ -423,7 +423,7 @@ impl PostgreDatabase {
         &self,
         project_id: i32,
         key: &str,
-        value: Value,
+        value: String,
     ) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"
@@ -435,7 +435,7 @@ impl PostgreDatabase {
             project_id,
             key,
             value.to_string(),
-            get_value_type(&value)
+            get_type(&value)
         )
         .execute(&self.sqlx_db)
         .await?;
@@ -458,6 +458,20 @@ fn get_value_type(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+fn get_type(value: &str) -> &'static str {
+    if value == "null" {
+        "null"
+    } else if value.parse::<bool>().is_ok() {
+        "boolean"
+    } else if value.parse::<i64>().is_ok() {
+        "integer"
+    } else if value.parse::<f64>().is_ok() {
+        "float"
+    } else {
+        "string"
     }
 }
 

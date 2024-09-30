@@ -1,4 +1,3 @@
-use serde_json::json;
 use std::sync::Arc;
 use tokio::time::{interval, sleep, Duration};
 
@@ -132,7 +131,7 @@ impl Scheduler {
         {
             Ok(tvl) => {
                 if let Err(e) = db
-                    .update_project_attribute(project_id, "total_value_locked", json!(tvl))
+                    .update_project_attribute(project_id, "total_value_locked", tvl.to_string())
                     .await
                 {
                     eprintln!("Error updating TVL: {}", e);
@@ -150,24 +149,21 @@ impl Scheduler {
         match external.get_data_from_tokenterminal("pancakeswap").await {
             Ok(data) => {
                 let updates = vec![
-                    ("ath", json!(data.ath)),
-                    ("ath_last", json!(data.ath_last)),
-                    ("atl", json!(data.atl)),
-                    ("atl_last", json!(data.atl_last)),
-                    ("revenue_30d", json!(data.revenue_30d)),
-                    ("revenue_annualized", json!(data.revenue_annualized)),
-                    ("expenses_30d", json!(data.expenses_30d)),
-                    ("earnings_30d", json!(data.earnings_30d)),
-                    ("fees_30d", json!(data.fees_30d)),
-                    ("fees_annualized", json!(data.fees_annualized)),
-                    ("token_incentives_30d", json!(data.token_incentives_30d)),
-                    ("monthly_active_users", json!(data.monthly_active_users)),
-                    ("afpu", json!(data.afpu)),
-                    ("arpu", json!(data.arpu)),
-                    (
-                        "token_trading_volume_30d",
-                        json!(data.token_trading_volume_30d),
-                    ),
+                    ("ath", data.ath),
+                    ("ath_last", data.ath_last),
+                    ("atl", data.atl),
+                    ("atl_last", data.atl_last),
+                    ("revenue_30d", data.revenue_30d),
+                    ("revenue_annualized", data.revenue_annualized),
+                    ("expenses_30d", data.expenses_30d),
+                    ("earnings_30d", data.earnings_30d),
+                    ("fees_30d", data.fees_30d),
+                    ("fees_annualized", data.fees_annualized),
+                    ("token_incentives_30d", data.token_incentives_30d),
+                    ("monthly_active_users", data.monthly_active_users),
+                    ("afpu", data.afpu),
+                    ("arpu", data.arpu),
+                    ("token_trading_volume_30d", data.token_trading_volume_30d),
                 ];
                 for (key, value) in updates {
                     if let Err(e) = db.update_project_attribute(project_id, key, value).await {
@@ -194,7 +190,7 @@ impl Scheduler {
                     .update_project_attribute(
                         project_id,
                         "market_cap_fully_diluted",
-                        json!(market_cap.fully_diluted),
+                        market_cap.fully_diluted.to_string(),
                     )
                     .await
                 {
@@ -204,7 +200,7 @@ impl Scheduler {
                     .update_project_attribute(
                         project_id,
                         "market_cap_circulating",
-                        json!(market_cap.normal),
+                        market_cap.normal.to_string(),
                     )
                     .await
                 {
@@ -228,7 +224,7 @@ impl Scheduler {
         {
             Ok(holders) => {
                 if let Err(e) = db
-                    .update_project_attribute(project_id, "num_token_holders", json!(holders))
+                    .update_project_attribute(project_id, "num_token_holders", holders.to_string())
                     .await
                 {
                     eprintln!("Error updating number of token holders: {}", e);
@@ -244,7 +240,7 @@ impl Scheduler {
             "0xc7efb4076dbe143cbcd98cfaaa929ecfc8f299203dfff63b95ccb6bfe19850fa::router::swap_exact_input"
         ).await {
             Ok(volume) => {
-                if let Err(e) = db.update_project_attribute(project_id, "trading_volume", json!(volume)).await {
+                if let Err(e) = db.update_project_attribute(project_id, "trading_volume", volume.to_string()).await {
                     eprintln!("Error updating trading volume: {}", e);
                 }
             },
@@ -261,7 +257,7 @@ impl Scheduler {
         {
             Ok(users) => {
                 if let Err(e) = db
-                    .update_project_attribute(project_id, "daily_active_users", json!(users))
+                    .update_project_attribute(project_id, "daily_active_users", users.to_string())
                     .await
                 {
                     eprintln!("Error updating daily active users: {}", e);
@@ -284,7 +280,7 @@ impl Scheduler {
         {
             Ok(users) => {
                 if let Err(e) = db
-                    .update_project_attribute(project_id, "weekly_active_users", json!(users))
+                    .update_project_attribute(project_id, "weekly_active_users", users.to_string())
                     .await
                 {
                     eprintln!("Error updating weekly active users: {}", e);
@@ -298,7 +294,7 @@ impl Scheduler {
         match external.get_fee_within_n_days_pancake(1).await {
             Ok(fees) => {
                 if let Err(e) = db
-                    .update_project_attribute(project_id, "daily_fees", json!(fees))
+                    .update_project_attribute(project_id, "daily_fees", fees.to_string())
                     .await
                 {
                     eprintln!("Error updating daily fees: {}", e);

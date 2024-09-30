@@ -219,7 +219,12 @@ impl External {
         project: &str,
     ) -> Result<TokenTerminalData, Error> {
         // Initialize the browser with headless mode
-        let browser = Browser::new(LaunchOptionsBuilder::default().headless(true).build()?)?;
+        let browser = Browser::new(
+            LaunchOptionsBuilder::default()
+                .headless(true)
+                .sandbox(false)
+                .build()?,
+        )?;
 
         // Create a new tab and navigate to the project page
         let tab = browser.new_tab()?;
